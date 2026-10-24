@@ -1,11 +1,12 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import Icon from './Icon';
 
 // Every row is one line of text, so rows have a fixed height and only the
 // rows in view (plus a few extra) need to be rendered
-const ROW_HEIGHT = 33;
+const ROW_HEIGHT = 38;
 const OVERSCAN = 10;
 
-function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
+function Inbox({ emails, selectedEmail, onEmailClick, loading, searchQuery }) {
   const [sortField, setSortField] = useState('date');
   const [sortDirection, setSortDirection] = useState('desc');
   
@@ -14,7 +15,7 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
     from: 160,
     subject: 220,
     preview: null, // null = flex
-    date: 140,
+    date: 150,
   });
   
   const [scrollTop, setScrollTop] = useState(0);
@@ -106,60 +107,50 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
   const firstRow = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
   const lastRow = Math.min(sortedEmails.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
 
-  const formatDate = (timestamp) => {
-    const date = new Date(timestamp * 1000);
-    return date.toLocaleDateString('cs-CZ', { 
-      day: '2-digit', 
-      month: '2-digit', 
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
-
   const ResizeHandle = ({ col }) => (
     <div
       onMouseDown={(e) => handleResizeStart(e, col)}
-      className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400 z-10"
+      className="absolute right-0 top-2 bottom-2 w-1.5 cursor-col-resize border-r border-ink-200 hover:border-accent-500 z-10"
     />
   );
 
   const SortHeader = ({ field, children, width, resizable = true }) => (
-    <th 
-      className="relative px-3 py-2 text-left select-none border-r border-gray-200"
-      style={{ width: width || 'auto' }}
-    >
-      <div 
-        className="flex items-center gap-1 cursor-pointer hover:text-blue-600"
+    <th className="relative px-3 h-9 text-left font-medium select-none" style={{ width: width || 'auto' }}>
+      <button
+        className={`flex items-center gap-1 rounded hover:text-ink-900 ${sortField === field ? 'text-ink-800' : ''}`}
         onClick={() => handleSort(field)}
       >
         {children}
-        {sortField === field && (
-          <span className="text-blue-600">
-            {sortDirection === 'asc' ? '▲' : '▼'}
-          </span>
-        )}
-      </div>
+        {sortField === field && <span className="text-[10px] text-accent-700">{sortDirection === 'asc' ? '▲' : '▼'}</span>}
+      </button>
       {resizable && <ResizeHandle col={field} />}
     </th>
   );
 
   if (loading && emails.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full bg-white">
-        <div className="text-center text-gray-500">
-          Načítání...
-        </div>
+      <div className="h-full overflow-hidden" aria-label="Načítám emaily">
+        {Array.from({ length: 8 }, (_, i) => (
+          <div key={i} className="flex items-center gap-6 px-9 border-b border-ink-100" style={{ height: ROW_HEIGHT }}>
+            <div className="h-3 w-32 rounded bg-ink-100 animate-pulse" />
+            <div className="h-3 w-56 rounded bg-ink-100 animate-pulse" />
+            <div className="h-3 flex-1 rounded bg-ink-100/70 animate-pulse" />
+            <div className="h-3 w-24 rounded bg-ink-100 animate-pulse" />
+          </div>
+        ))}
       </div>
     );
   }
 
   if (emails.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full bg-white">
-        <div className="text-center text-gray-500">
-          Žádné emaily
-        </div>
+      <div className="h-full flex flex-col items-center justify-center gap-2 text-center px-6">
+        <Icon name={searchQuery ? 'search' : 'mail'} className="w-9 h-9 text-ink-300" />
+        {searchQuery ? (
+          <p className="text-ink-600">Nic jsme nenašli pro „{searchQuery}“. Zkuste jiné slovo.</p>
+        ) : (
+          <p className="text-ink-600">Zatím tu nejsou žádné emaily. Stahují se ze Seznamu, chvíli to může trvat.</p>
+        )}
       </div>
     );
   }
@@ -168,59 +159,52 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
     <div
       ref={scrollContainerRef}
       onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
-      className="h-full overflow-auto bg-white"
+      className="h-full overflow-auto"
     >
-      <table className="w-full text-sm border-collapse" style={{ tableLayout: 'fixed' }}>
-        <thead className="bg-gray-100 sticky top-0 border-b border-gray-300">
+      <table className="w-full border-collapse" style={{ tableLayout: 'fixed' }}>
+        <thead className="sticky top-0 z-20 bg-white text-xs text-ink-500 shadow-[inset_0_-1px_0_theme(colors.ink.200)]">
           <tr>
-            <th className="w-6 px-2 py-2"></th>
+            <th className="w-7" aria-label="Nepřečtené"></th>
             <SortHeader field="from" width={colWidths.from}>Od</SortHeader>
             <SortHeader field="subject" width={colWidths.subject}>Předmět</SortHeader>
-            <th className="px-3 py-2 text-left text-gray-500 border-r border-gray-200">Náhled</th>
+            <th className="px-3 h-9 text-left font-medium">Náhled</th>
             <SortHeader field="date" width={colWidths.date} resizable={false}>Datum</SortHeader>
           </tr>
         </thead>
         <tbody>
           {firstRow > 0 && <tr style={{ height: firstRow * ROW_HEIGHT }} />}
-          {sortedEmails.slice(firstRow, lastRow).map((email) => (
-            <tr
-              key={email.id}
-              style={{ height: ROW_HEIGHT }}
-              onClick={() => onEmailClick(email.id)}
-              className={`cursor-pointer border-b border-gray-100 hover:bg-blue-50 ${
-                selectedEmail?.id === email.id ? 'bg-blue-100' : ''
-              } ${!email.is_read ? 'font-semibold bg-blue-50/50' : ''}`}
-            >
-              <td className="px-2 py-1.5 text-center" style={{ width: 24 }}>
-                {!email.is_read && (
-                  <div className="w-2 h-2 bg-blue-600 rounded-full mx-auto"></div>
-                )}
-              </td>
-              <td 
-                className="px-3 py-1.5 overflow-hidden text-ellipsis whitespace-nowrap" 
-                style={{ width: colWidths.from }}
-                title={email.from_addr}
+          {sortedEmails.slice(firstRow, lastRow).map((email) => {
+            const selected = selectedEmail?.id === email.id;
+            const unread = !email.is_read;
+            return (
+              <tr
+                key={email.id}
+                style={{ height: ROW_HEIGHT }}
+                onClick={() => onEmailClick(email.id)}
+                className={`cursor-pointer border-b border-ink-100 transition-colors ${
+                  selected
+                    ? 'bg-accent-50 shadow-[inset_3px_0_0_theme(colors.accent.600)]'
+                    : 'hover:bg-ink-50'
+                } ${unread ? 'font-semibold text-ink-900' : 'text-ink-700'}`}
               >
-                {email.from_name || email.from_addr}
-              </td>
-              <td 
-                className="px-3 py-1.5 overflow-hidden text-ellipsis whitespace-nowrap" 
-                style={{ width: colWidths.subject }}
-                title={email.subject}
-              >
-                {email.subject || '(Bez předmětu)'}
-              </td>
-              <td className="px-3 py-1.5 overflow-hidden text-ellipsis whitespace-nowrap text-gray-500 font-normal">
-                {email.preview || '—'}
-              </td>
-              <td 
-                className="px-3 py-1.5 whitespace-nowrap text-gray-600 text-right"
-                style={{ width: colWidths.date }}
-              >
-                {formatDate(email.date)}
-              </td>
-            </tr>
-          ))}
+                <td className="text-center">
+                  {unread && <span className="inline-block w-2 h-2 rounded-full bg-accent-600" title="Nepřečtený" />}
+                </td>
+                <td className="px-3 truncate" title={email.from_addr}>
+                  {email.from_name || email.from_addr}
+                </td>
+                <td className="px-3 truncate" title={email.subject}>
+                  {email.subject || '(Bez předmětu)'}
+                </td>
+                <td className="px-3 truncate text-sm font-normal text-ink-500">
+                  {email.preview || '—'}
+                </td>
+                <td className="px-3 whitespace-nowrap text-sm text-right tabular-nums text-ink-600">
+                  {formatDate(email.date)}
+                </td>
+              </tr>
+            );
+          })}
           {lastRow < sortedEmails.length && (
             <tr style={{ height: (sortedEmails.length - lastRow) * ROW_HEIGHT }} />
           )}
@@ -228,6 +212,17 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
       </table>
     </div>
   );
+}
+
+// Today and yesterday by name, like Thunderbird; older emails with the full date
+function formatDate(timestamp) {
+  const date = new Date(timestamp * 1000);
+  const time = date.toLocaleTimeString('cs-CZ', { hour: 'numeric', minute: '2-digit' });
+  const today = new Date();
+  const yesterday = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return `dnes ${time}`;
+  if (date.toDateString() === yesterday.toDateString()) return `včera ${time}`;
+  return `${date.toLocaleDateString('cs-CZ', { day: 'numeric', month: 'numeric', year: 'numeric' })} ${time}`;
 }
 
 export default Inbox;

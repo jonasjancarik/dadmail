@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { createPreviewApi } from './previewApi';
 
 // Calls into the Rust backend (src-tauri/src/lib.rs)
 
@@ -19,7 +20,7 @@ function subscribe(event, callback) {
   return () => unlisten.then((stop) => stop());
 }
 
-export const api = {
+const tauriApi = {
   getEmails: (searchQuery) => invoke('get_emails', { searchQuery }),
   getEmail: (id) => invoke('get_email', { id }),
   deleteEmail: (id) => withStatus('delete_email', { id }),
@@ -33,8 +34,12 @@ export const api = {
   reprocessEmails: () => withStatus('reprocess_emails', {}, (processed) => ({ processed })),
   openLink: (url) => withStatus('open_link', { url }),
   setZoom: (zoom) => invoke('set_zoom', { zoom }),
+  syncNow: () => invoke('sync_now'),
   checkForUpdate: () => invoke('check_for_update').catch(() => null),
   installUpdate: () => withStatus('install_update'),
   openAttachment: (emailId, index) => withStatus('open_attachment', { emailId, index }),
   saveAttachment: (emailId, index) => withStatus('save_attachment', { emailId, index }, (fileName) => ({ fileName })),
 };
+
+// In development, the UI can also be opened in a normal browser with sample emails
+export const api = import.meta.env.DEV && !window.__TAURI_INTERNALS__ ? createPreviewApi() : tauriApi;

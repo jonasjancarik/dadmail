@@ -19,6 +19,10 @@ npm install
 npm run dev
 ```
 
+Vzhled lze ladit i v běžném prohlížeči s ukázkovými emaily, bez aplikace a bez
+skutečné schránky: `npm run preview:ui` a otevřít http://localhost:1420
+(`src/renderer/previewApi.js`; do sestavené aplikace se nedostane).
+
 ## Sestavení
 
 ```bash

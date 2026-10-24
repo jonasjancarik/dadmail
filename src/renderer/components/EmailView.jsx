@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { api } from '../api';
 import { handleZoomKey } from '../zoom';
+import Icon from './Icon';
 
 const SANITIZE_OPTIONS = {
   ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'b', 'i', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'span', 'table', 'tr', 'td', 'th', 'thead', 'tbody', 'img', 'hr', 'blockquote', 'pre', 'code'],
@@ -30,6 +31,17 @@ function mismatchedSenderDomain(name, address) {
   return null;
 }
 
+function formatDate(timestamp) {
+  return new Date(timestamp * 1000).toLocaleString('cs-CZ', {
+    weekday: 'long',
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} kB`;
@@ -38,15 +50,15 @@ function formatSize(bytes) {
 
 const FRAME_STYLE = `
   body {
-    font-size: 14px;
-    line-height: 1.5;
+    font-size: 15px;
+    line-height: 1.6;
     max-width: 100%;
-    padding: 12px;
+    padding: 16px 24px 32px;
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
     word-wrap: break-word;
     overflow-x: hidden;
-    color: #333;
+    color: #1e293b;
   }
   * {
     max-width: 100%;
@@ -62,7 +74,7 @@ const FRAME_STYLE = `
     display: block;
   }
   a {
-    color: #0066cc;
+    color: #1d4ed8;
   }
   pre, code {
     white-space: pre-wrap;
@@ -70,6 +82,7 @@ const FRAME_STYLE = `
   }
   body.plain-text {
     white-space: pre-wrap;
+    max-width: 75ch;
   }
 `;
 
@@ -133,16 +146,6 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
     return null;
   }
 
-  const formatDate = (timestamp) => {
-    const date = new Date(timestamp * 1000);
-    return date.toLocaleString('cs-CZ', {
-      day: 'numeric',
-      month: 'long',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  };
 
   const suspiciousDomain = mismatchedSenderDomain(email.from_name, email.from_addr);
   const attachments = email.attachments || [];
@@ -165,71 +168,77 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
     );
   };
 
+  const senderName = email.from_name || email.from_addr;
+
   return (
-    <div className="h-full flex flex-col">
-      {/* Email Header - Compact */}
-      <div className="bg-gray-50 border-b border-gray-200 px-4 py-2">
+    <article className="h-full flex flex-col">
+      <header className="shrink-0 px-6 pt-4 pb-3 border-b border-ink-200 space-y-3">
         <div className="flex items-start justify-between gap-4">
-          <div className="flex-1 min-w-0">
-            <h2 className="font-semibold text-gray-900 truncate">
-              {email.subject || '(Bez předmětu)'}
-            </h2>
-            <div className="text-sm text-gray-600 mt-1">
-              <span className="font-medium">Od:</span>{' '}
-              {email.from_name && <span className="font-medium text-gray-900">{email.from_name} </span>}
-              <span className="text-gray-800">&lt;{email.from_addr}&gt;</span>
-              <span className="mx-2">|</span>
-              <span className="font-medium">Komu:</span> {email.to_addr}
-              <span className="mx-2">|</span>
-              <span className="text-gray-500">{formatDate(email.date)}</span>
-            </div>
-          </div>
+          <h1 className="text-xl font-semibold text-ink-900 [text-wrap:balance] min-w-0">
+            {email.subject || '(Bez předmětu)'}
+          </h1>
           <div className="flex gap-2 shrink-0">
-            <button
-              onClick={() => onReply(email)}
-              className="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700"
-            >
+            <button onClick={() => onReply(email)} className="btn-primary">
+              <Icon name="reply" className="w-[18px] h-[18px]" />
               Odpovědět
             </button>
-            <button
-              onClick={onDelete}
-              className="px-3 py-1 text-sm bg-white border border-gray-300 text-red-600 rounded hover:bg-red-50"
-            >
+            <button onClick={onDelete} className="btn-danger">
+              <Icon name="trash" className="w-[18px] h-[18px]" />
               Smazat
             </button>
           </div>
         </div>
 
+        <div className="flex items-center gap-3">
+          <div
+            className="w-10 h-10 shrink-0 rounded-xl bg-accent-100 text-accent-800 font-semibold text-lg flex items-center justify-center"
+            aria-hidden="true"
+          >
+            {senderName.trim().charAt(0).toUpperCase()}
+          </div>
+          <div className="min-w-0">
+            <div className="truncate">
+              {email.from_name && <span className="font-semibold text-ink-900">{email.from_name} </span>}
+              <span className="text-ink-600">&lt;{email.from_addr}&gt;</span>
+            </div>
+            <div className="text-sm text-ink-500 truncate">
+              Komu: {email.to_addr} · {formatDate(email.date)}
+            </div>
+          </div>
+        </div>
+
         {suspiciousDomain && (
-          <div className="mt-2 px-3 py-2 rounded bg-amber-100 border border-amber-300 text-amber-900 text-sm">
-            <strong>Pozor:</strong> jméno odesílatele uvádí „{suspiciousDomain}“, ale email přišel z adresy{' '}
-            <strong>{email.from_addr}</strong>. Může jít o podvod. Neklikejte na odkazy a nikam nezadávejte hesla
-            ani čísla karet.
+          <div className="flex gap-3 px-3 py-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-900">
+            <Icon name="warning" className="w-5 h-5 mt-0.5 text-amber-600" />
+            <p>
+              <strong>Pozor, může jít o podvod.</strong> Jméno odesílatele uvádí „{suspiciousDomain}“, ale email
+              přišel z adresy <strong>{email.from_addr}</strong>. Neklikejte na odkazy a nikam nezadávejte hesla
+              ani čísla karet.
+            </p>
           </div>
         )}
 
         {attachments.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className="flex flex-wrap gap-2">
             {attachments.map((attachment) => (
               <div
                 key={attachment.index}
-                className="flex items-center gap-2 px-2 py-1 bg-white border border-gray-300 rounded text-sm"
+                className="flex items-center gap-2 h-10 pl-3 pr-1 rounded-lg bg-ink-50 border border-ink-200 text-sm"
               >
-                <span aria-hidden="true">📎</span>
-                <span className="font-medium text-gray-800">{attachment.file_name}</span>
-                <span className="text-gray-500">{formatSize(attachment.size)}</span>
+                <Icon name="paperclip" className="w-4 h-4 text-ink-500" />
+                <span className="font-medium text-ink-800 max-w-[16rem] truncate" title={attachment.file_name}>
+                  {attachment.file_name}
+                </span>
+                <span className="text-ink-500 tabular-nums">{formatSize(attachment.size)}</span>
+                <span className="w-px h-5 bg-ink-200 mx-1" />
                 {!attachment.risky && (
-                  <button
-                    onClick={() => openAttachment(attachment)}
-                    className="px-2 py-0.5 text-blue-700 hover:bg-blue-50 rounded"
-                  >
+                  <button onClick={() => openAttachment(attachment)} className="btn-quiet h-8 px-2.5">
+                    <Icon name="open" className="w-4 h-4" />
                     Otevřít
                   </button>
                 )}
-                <button
-                  onClick={() => saveAttachment(attachment)}
-                  className="px-2 py-0.5 text-blue-700 hover:bg-blue-50 rounded"
-                >
+                <button onClick={() => saveAttachment(attachment)} className="btn-quiet h-8 px-2.5">
+                  <Icon name="download" className="w-4 h-4" />
                   Uložit
                 </button>
               </div>
@@ -237,29 +246,27 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
           </div>
         )}
         {attachments.some((a) => a.risky) && (
-          <div className="mt-1 text-xs text-gray-600">
-            Některé přílohy mohou spustit program, proto je DadMail neotevře. Uložte je jen tehdy, když odesílatele znáte
-            a přílohu jste čekali.
-          </div>
+          <p className="text-sm text-ink-600">
+            Některé přílohy mohou spustit program, proto je DadMail neotevře. Uložte je jen tehdy, když odesílatele
+            znáte a přílohu jste čekali.
+          </p>
         )}
         {attachmentMessage && (
-          <div className={`mt-1 text-sm ${attachmentMessage.error ? 'text-red-700' : 'text-green-700'}`}>
+          <p className={`text-sm ${attachmentMessage.error ? 'text-red-700' : 'text-emerald-700'}`} role="status">
             {attachmentMessage.text}
-          </div>
+          </p>
         )}
 
         {hasRemoteImages && !showImages && (
-          <div className="mt-2 flex items-center gap-3 text-sm text-gray-700">
+          <div className="flex items-center gap-3 text-sm text-ink-600">
+            <Icon name="image" className="w-[18px] h-[18px] text-ink-400" />
             <span>Obrázky z internetu jsou skryté, aby odesílatel nepoznal, že jste email otevřeli.</span>
-            <button
-              onClick={() => setShowImages(true)}
-              className="px-2 py-0.5 bg-white border border-gray-300 rounded hover:bg-gray-50"
-            >
+            <button onClick={() => setShowImages(true)} className="btn-secondary h-8">
               Zobrazit obrázky
             </button>
           </div>
         )}
-      </div>
+      </header>
 
       {/* Email Body */}
       <div className="flex-1 overflow-hidden">
@@ -273,12 +280,12 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
             title="Obsah emailu"
           />
         ) : (
-          <div className="p-4 text-center text-gray-400">
+          <div className="p-6 text-center text-ink-400">
             Tento email nemá obsah
           </div>
         )}
       </div>
-    </div>
+    </article>
   );
 }
 

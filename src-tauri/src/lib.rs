@@ -408,6 +408,13 @@ async fn reprocess_emails(state: State<'_, AppState>) -> CommandResult<usize> {
     .map_err(to_string_error)?
 }
 
+// "Načíst zprávy": check for new mail now instead of waiting for the next round
+#[tauri::command]
+async fn sync_now(state: State<'_, AppState>) -> CommandResult<()> {
+    state.sync_now.notify_one();
+    Ok(())
+}
+
 // Links from emails open in the default browser; only web addresses are allowed
 #[tauri::command]
 async fn open_link(url: String) -> CommandResult<()> {
@@ -567,6 +574,7 @@ pub fn run() {
             open_attachment,
             save_attachment,
             set_zoom,
+            sync_now,
             check_for_update,
             install_update,
         ])

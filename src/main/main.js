@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { initDatabase } from './db.js';
@@ -8,19 +8,19 @@ import { sendEmail } from './smtp.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// Debug: log the paths
-console.log('Main file __dirname:', __dirname);
-console.log('Preload path will be:', join(__dirname, './preload.js'));
-
 let mainWindow;
 let db;
 
 function createWindow() {
+  // Fit the window to the screen; Windows laptops with display scaling
+  // often have less than 1200x800 of usable space
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
+
   mainWindow = new BrowserWindow({
-    width: 1200,
-    height: 800,
-    minWidth: 1200,
-    minHeight: 800,
+    width: Math.min(1200, screenWidth),
+    height: Math.min(800, screenHeight),
+    minWidth: 800,
+    minHeight: 500,
     show: false, // Don't show until ready
     webPreferences: {
       preload: join(__dirname, './preload.js'),
@@ -32,20 +32,14 @@ function createWindow() {
   // Show window immediately
   mainWindow.show();
   mainWindow.focus();
-  
-  // Try loading from Vite dev server first (development)
-  // electron-forge will have the dev server running on localhost:5173
-  mainWindow.loadURL('http://localhost:5173').then(() => {
-    console.log('Window loaded successfully from Vite dev server');
-  }).catch((err) => {
-    console.error('Error loading from Vite dev server:', err);
-    // Fallback to file if dev server not available
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html')).then(() => {
-      console.log('Window loaded from file');
-    }).catch((fileErr) => {
-      console.error('Error loading from file:', fileErr);
-    });
-  });
+
+  // electron-forge's Vite plugin defines these: the dev server URL in development,
+  // the bundled renderer folder name in packaged builds
+  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+    mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
+  } else {
+    mainWindow.loadFile(join(__dirname, `../renderer/${MAIN_WINDOW_VITE_NAME}/index.html`));
+  }
   
   // Open dev tools in development
   if (!app.isPackaged) {

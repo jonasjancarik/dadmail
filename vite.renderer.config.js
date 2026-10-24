@@ -8,9 +8,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   plugins: [react()],
   root: path.resolve(__dirname, './src/renderer'),
-  server: {
-    port: 5173,
-    strictPort: true,
+  build: {
+    // With a custom root, Forge's relative output folder would end up inside src/renderer
+    // and the packaged app would not contain the UI
+    outDir: path.resolve(__dirname, '.vite/renderer/main_window'),
+    emptyOutDir: true,
   },
   resolve: {
     alias: {

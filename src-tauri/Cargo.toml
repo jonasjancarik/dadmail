@@ -31,3 +31,6 @@ mail-parser = "0.11.9"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 lettre = { version = "0.11.23", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-native-tls", "hostname"] }
 regex = "1"
+keyring = "4.2.0"
+tauri-plugin-opener = "2.7.2"
+base64 = "0.22"

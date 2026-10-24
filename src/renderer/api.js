@@ -31,4 +31,7 @@ export const api = {
   onSyncStatus: (callback) => subscribe('sync-status', callback),
   clearEmails: () => withStatus('clear_emails'),
   reprocessEmails: () => withStatus('reprocess_emails', {}, (processed) => ({ processed })),
+  openLink: (url) => withStatus('open_link', { url }),
+  openAttachment: (emailId, index) => withStatus('open_attachment', { emailId, index }),
+  saveAttachment: (emailId, index) => withStatus('save_attachment', { emailId, index }, (fileName) => ({ fileName })),
 };

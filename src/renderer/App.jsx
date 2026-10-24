@@ -12,6 +12,7 @@ function App() {
   const [showCompose, setShowCompose] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [replyToEmail, setReplyToEmail] = useState(null);
+  const [composeTo, setComposeTo] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const searchQueryRef = useRef('');
   const [loading, setLoading] = useState(true);
@@ -97,7 +98,7 @@ function App() {
   const loadSettings = async () => {
     const loadedSettings = await api.getSettings();
     setSettings(loadedSettings);
-    if (!loadedSettings.email || !loadedSettings.password) {
+    if (!loadedSettings.email || loadedSettings.has_password !== '1') {
       setShowSettings(true);
     }
   };
@@ -127,14 +128,21 @@ function App() {
     setShowCompose(true);
   };
 
+  // An email address clicked inside an email
+  const handleWriteTo = (address) => {
+    setReplyToEmail(null);
+    setComposeTo(address);
+    setShowCompose(true);
+  };
+
   const handleComposeClose = () => {
     setShowCompose(false);
     setReplyToEmail(null);
+    setComposeTo('');
   };
 
   const handleEmailSent = () => {
-    setShowCompose(false);
-    setReplyToEmail(null);
+    handleComposeClose();
     loadEmails();
   };
 
@@ -245,6 +253,7 @@ function App() {
               email={selectedEmail}
               onReply={handleReply}
               onDelete={handleDelete}
+              onWriteTo={handleWriteTo}
             />
           ) : (
             <div className="flex items-center justify-center h-full text-gray-400">
@@ -258,6 +267,7 @@ function App() {
       {showCompose && (
         <Compose
           replyTo={replyToEmail}
+          initialTo={composeTo}
           onClose={handleComposeClose}
           onSent={handleEmailSent}
         />

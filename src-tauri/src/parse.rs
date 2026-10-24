@@ -1,7 +1,9 @@
 use std::sync::LazyLock;
 
-use mail_parser::{MessageParser, PartType};
+use base64::Engine;
+use mail_parser::{MessageParser, MimeHeaders, PartType};
 use regex::Regex;
+use serde::Serialize;
 
 const PREVIEW_LENGTH: usize = 200;
 
@@ -100,4 +102,174 @@ pub fn parse_raw_email(raw: &[u8]) -> Option<ParsedEmail> {
         body_html,
         body_text,
     })
+}
+
+#[derive(Serialize)]
+pub struct AttachmentInfo {
+    pub index: usize,
+    pub file_name: String,
+    pub size: usize,
+    // Opening these could run a program, so the UI only offers saving them
+    pub risky: bool,
+}
+
+pub struct EmailContent {
+    pub body_html: String,
+    pub attachments: Vec<AttachmentInfo>,
+}
+
+fn file_name_for(part: &mail_parser::MessagePart, index: usize) -> String {
+    let extension = part
+        .content_type()
+        .and_then(|ct| ct.subtype())
+        .map(|subtype| match subtype.to_ascii_lowercase().as_str() {
+            "jpeg" => "jpg".to_string(),
+            "plain" => "txt".to_string(),
+            "rfc822" => "eml".to_string(),
+            other => other.to_string(),
+        });
+    let name = part.attachment_name().map(str::to_string).unwrap_or_else(|| match extension {
+        Some(ext) => format!("priloha-{}.{ext}", index + 1),
+        None => format!("priloha-{}", index + 1),
+    });
+    safe_file_name(&name)
+}
+
+// Inline images referenced from the HTML as cid:… become data: URLs, so they show
+// without loading anything from the internet. Everything else is listed as an attachment.
+pub fn email_content(raw: &[u8], stored_html: &str) -> EmailContent {
+    let mut body_html = stored_html.to_string();
+    let mut attachments = Vec::new();
+    let Some(message) = MessageParser::default().parse(raw) else {
+        return EmailContent { body_html, attachments };
+    };
+
+    for (index, part) in message.attachments().enumerate() {
+        let content_id = part
+            .content_id()
+            .map(|id| id.trim_matches(|c| c == '<' || c == '>').to_string());
+        let is_image = part.content_type().is_some_and(|ct| ct.ctype().eq_ignore_ascii_case("image"));
+        if let Some(id) = content_id.filter(|id| is_image && body_html.contains(&format!("cid:{id}"))) {
+            let ct = part.content_type().unwrap();
+            let mime = format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or("png")).to_ascii_lowercase();
+            let data = base64::engine::general_purpose::STANDARD.encode(part.contents());
+            body_html = body_html.replace(&format!("cid:{id}"), &format!("data:{mime};base64,{data}"));
+            continue;
+        }
+        let file_name = file_name_for(part, index);
+        attachments.push(AttachmentInfo {
+            index,
+            risky: is_risky_to_open(&file_name),
+            file_name,
+            size: part.contents().len(),
+        });
+    }
+    EmailContent { body_html, attachments }
+}
+
+// File name and contents of the attachment at `index` (as listed by email_content)
+pub fn attachment(raw: &[u8], index: usize) -> Option<(String, Vec<u8>)> {
+    let message = MessageParser::default().parse(raw)?;
+    let part = message.attachments().nth(index)?;
+    Some((file_name_for(part, index), part.contents().to_vec()))
+}
+
+// A file name that is valid on Windows and macOS and cannot point outside its folder
+pub fn safe_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_control() || "<>:\"/\\|?*".contains(c) { '_' } else { c })
+        .collect();
+    let cleaned = cleaned.trim().trim_matches('.').trim();
+    if cleaned.is_empty() {
+        "priloha".to_string()
+    } else {
+        cleaned.chars().take(150).collect()
+    }
+}
+
+pub fn is_risky_to_open(file_name: &str) -> bool {
+    const RISKY: &[&str] = &[
+        "exe", "com", "bat", "cmd", "msi", "msp", "scr", "pif", "cpl", "js", "jse", "vbs", "vbe",
+        "wsf", "wsh", "ps1", "psm1", "hta", "jar", "lnk", "reg", "iso", "img", "vhd", "vhdx",
+        "app", "command", "sh", "pkg", "dmg", "html", "htm", "svg",
+    ];
+    file_name
+        .rsplit_once('.')
+        .is_some_and(|(_, ext)| RISKY.contains(&ext.to_ascii_lowercase().as_str()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EMAIL_WITH_ATTACHMENTS: &str = "From: Jan Novak <jan@example.cz>\r
+To: tata@seznam.cz\r
+Subject: Fotky\r
+Message-ID: <abc@example.cz>\r
+MIME-Version: 1.0\r
+Content-Type: multipart/mixed; boundary=\"outer\"\r
+\r
+--outer\r
+Content-Type: multipart/related; boundary=\"inner\"\r
+\r
+--inner\r
+Content-Type: text/html; charset=utf-8\r
+\r
+<p>Ahoj</p><img src=\"cid:logo@x\">\r
+--inner\r
+Content-Type: image/png\r
+Content-ID: <logo@x>\r
+Content-Transfer-Encoding: base64\r
+\r
+iVBORw0KGgo=\r
+--inner--\r
+--outer\r
+Content-Type: application/pdf; name=\"faktura.pdf\"\r
+Content-Disposition: attachment; filename=\"faktura.pdf\"\r
+Content-Transfer-Encoding: base64\r
+\r
+JVBERi0xLjQ=\r
+--outer\r
+Content-Type: application/octet-stream\r
+Content-Disposition: attachment; filename=\"../../evil.exe\"\r
+Content-Transfer-Encoding: base64\r
+\r
+TVo=\r
+--outer--\r
+";
+
+    #[test]
+    fn inline_images_become_data_urls_and_files_are_listed() {
+        let raw = EMAIL_WITH_ATTACHMENTS.as_bytes();
+        let parsed = parse_raw_email(raw).unwrap();
+        assert_eq!(parsed.message_id.as_deref(), Some("<abc@example.cz>"));
+        let content = email_content(raw, &parsed.body_html);
+        assert!(content.body_html.contains("data:image/png;base64,iVBORw0KGgo="));
+        assert!(!content.body_html.contains("cid:"));
+        let names: Vec<_> = content.attachments.iter().map(|a| a.file_name.as_str()).collect();
+        assert_eq!(names, ["faktura.pdf", "_.._evil.exe"]);
+        assert!(!content.attachments[0].risky);
+        assert!(content.attachments[1].risky);
+
+        let (name, bytes) = attachment(raw, content.attachments[0].index).unwrap();
+        assert_eq!(name, "faktura.pdf");
+        assert_eq!(bytes, b"%PDF-1.4");
+    }
+
+    #[test]
+    fn file_names_are_made_safe() {
+        assert_eq!(safe_file_name("a/b\\c:d?.pdf"), "a_b_c_d_.pdf");
+        assert_eq!(safe_file_name(" .. "), "priloha");
+        assert!(is_risky_to_open("Faktura.PDF.exe"));
+        assert!(!is_risky_to_open("foto.JPG"));
+    }
+
+    #[test]
+    fn text_only_email_has_no_html() {
+        let raw = b"From: a@b.cz\r\nSubject: x\r\n\r\nAhoj <b>tati</b>\r\n";
+        let parsed = parse_raw_email(raw).unwrap();
+        assert!(parsed.body_html.is_empty());
+        assert!(parsed.body_text.contains("Ahoj <b>tati</b>"));
+    }
 }

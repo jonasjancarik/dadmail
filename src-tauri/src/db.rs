@@ -39,13 +39,22 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         ",
     )?;
 
-    // Databases created by older Electron versions have no preview column
-    let has_preview: bool = db
-        .prepare("SELECT 1 FROM pragma_table_info('emails') WHERE name = 'preview'")?
-        .exists([])?;
-    if !has_preview {
-        db.execute("ALTER TABLE emails ADD COLUMN preview TEXT", [])?;
+    // Columns added after the first version.
+    // uid: the email's IMAP UID in INBOX, so changes can be sent to the server.
+    // pending_action: 'read' or 'delete', made in DadMail but not yet sent to the server.
+    for (column, definition) in [
+        ("preview", "TEXT"),
+        ("uid", "INTEGER"),
+        ("pending_action", "TEXT"),
+    ] {
+        let exists: bool = db
+            .prepare("SELECT 1 FROM pragma_table_info('emails') WHERE name = ?")?
+            .exists([column])?;
+        if !exists {
+            db.execute(&format!("ALTER TABLE emails ADD COLUMN {column} {definition}"), [])?;
+        }
     }
+    db.execute("CREATE INDEX IF NOT EXISTS idx_uid ON emails(uid)", [])?;
     fill_missing_previews(&db)?;
 
     // Full-text search index, kept in sync with the emails table by triggers.

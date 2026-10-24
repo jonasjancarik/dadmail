@@ -4,6 +4,8 @@ import { api } from '../api';
 function Settings({ onClose }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  // The saved password is never sent to this screen, only which email it belongs to
+  const [savedPasswordFor, setSavedPasswordFor] = useState(null);
   const [syncFromDate, setSyncFromDate] = useState('');
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -20,14 +22,20 @@ function Settings({ onClose }) {
     const settings = await api.getSettings();
     if (settings.email) {
       setEmail(settings.email);
+      if (settings.has_password === '1') {
+        setSavedPasswordFor(settings.email);
+      }
     }
     if (settings.sync_from_date) {
       setSyncFromDate(settings.sync_from_date);
     }
   };
 
+  const hasSavedPassword = savedPasswordFor !== null && savedPasswordFor === email.trim();
+  const missingCredentials = () => !email.trim() || (!password.trim() && !hasSavedPassword);
+
   const handleTest = async () => {
-    if (!email.trim() || !password.trim()) {
+    if (missingCredentials()) {
       setError('Vyplňte email a heslo');
       return;
     }
@@ -55,7 +63,7 @@ function Settings({ onClose }) {
   };
 
   const handleSave = async () => {
-    if (!email.trim() || !password.trim()) {
+    if (missingCredentials()) {
       setError('Vyplňte email a heslo');
       return;
     }
@@ -72,7 +80,11 @@ function Settings({ onClose }) {
       if (syncFromDate) {
         settingsToSave.sync_from_date = syncFromDate;
       }
-      await api.saveSettings(settingsToSave);
+      const result = await api.saveSettings(settingsToSave);
+      if (!result.success) {
+        setError(result.error);
+        return;
+      }
       setSuccess('Nastavení uloženo!');
       setTimeout(() => {
         onClose();
@@ -112,7 +124,7 @@ function Settings({ onClose }) {
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Vaše heslo"
+              placeholder={hasSavedPassword ? 'Heslo je uložené, vyplňte jen pro změnu' : 'Vaše heslo'}
               className="input-field"
               disabled={testing || saving}
             />

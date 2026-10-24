@@ -1,6 +1,7 @@
 mod db;
 mod imap;
 mod parse;
+mod secrets;
 mod smtp;
 
 use std::collections::HashMap;
@@ -9,9 +10,12 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use tauri::{LogicalSize, Manager, State};
+use tokio::sync::Notify;
 
 struct AppState {
     db: Arc<Mutex<Connection>>,
+    // Wakes the sync loop so reads and deletes reach the server right away
+    sync_now: Arc<Notify>,
 }
 
 type CommandResult<T> = Result<T, String>;
@@ -45,6 +49,7 @@ struct Email {
     date: i64,
     is_read: i64,
     thread_id: Option<String>,
+    attachments: Vec<parse::AttachmentInfo>,
 }
 
 // Turn what the user typed into an FTS5 query: every word must match,
@@ -103,59 +108,113 @@ async fn get_emails(state: State<'_, AppState>, search_query: Option<String>) ->
 #[tauri::command]
 async fn get_email(state: State<'_, AppState>, id: i64) -> CommandResult<Option<Email>> {
     let conn = state.db.lock().unwrap();
-    let email = conn
+    let row = conn
         .query_row(
             "SELECT id, message_id, from_addr, from_name, to_addr, subject,
-               body_html, body_text, date, is_read, thread_id
+               body_html, body_text, date, is_read, thread_id, raw_content
              FROM emails WHERE id = ?",
             [id],
             |r| {
-                Ok(Email {
-                    id: r.get(0)?,
-                    message_id: r.get(1)?,
-                    from_addr: r.get(2)?,
-                    from_name: r.get(3)?,
-                    to_addr: r.get(4)?,
-                    subject: r.get(5)?,
-                    body_html: r.get(6)?,
-                    body_text: r.get(7)?,
-                    date: r.get(8)?,
-                    is_read: r.get(9)?,
-                    thread_id: r.get(10)?,
-                })
+                Ok((
+                    Email {
+                        id: r.get(0)?,
+                        message_id: r.get(1)?,
+                        from_addr: r.get(2)?,
+                        from_name: r.get(3)?,
+                        to_addr: r.get(4)?,
+                        subject: r.get(5)?,
+                        body_html: r.get(6)?,
+                        body_text: r.get(7)?,
+                        date: r.get(8)?,
+                        is_read: r.get(9)?,
+                        thread_id: r.get(10)?,
+                        attachments: Vec::new(),
+                    },
+                    r.get::<_, Option<Vec<u8>>>(11)?,
+                ))
             },
         )
         .optional()
         .map_err(to_string_error)?;
+    let Some((mut email, raw)) = row else {
+        return Ok(None);
+    };
 
-    // Mark as read
-    if email.as_ref().is_some_and(|e| e.is_read == 0) {
-        conn.execute("UPDATE emails SET is_read = 1 WHERE id = ?", [id])
-            .map_err(to_string_error)?;
+    // Attachments and inline images come from the original email
+    if let Some(raw) = raw {
+        let content = parse::email_content(&raw, email.body_html.as_deref().unwrap_or(""));
+        if email.body_html.as_deref().is_some_and(|h| !h.is_empty()) {
+            email.body_html = Some(content.body_html);
+        }
+        email.attachments = content.attachments;
     }
-    Ok(email)
+
+    // Mark as read, here and (on the next sync) on the server
+    if email.is_read == 0 {
+        conn.execute(
+            "UPDATE emails SET is_read = 1, pending_action = COALESCE(pending_action, 'read') WHERE id = ?",
+            [id],
+        )
+        .map_err(to_string_error)?;
+        state.sync_now.notify_one();
+    }
+    Ok(Some(email))
 }
 
 #[tauri::command]
 async fn delete_email(state: State<'_, AppState>, id: i64) -> CommandResult<()> {
     let conn = state.db.lock().unwrap();
-    conn.execute("UPDATE emails SET is_deleted = 1 WHERE id = ?", [id])
-        .map_err(to_string_error)?;
+    // Hidden here right away; the next sync moves it to the server's trash
+    conn.execute(
+        "UPDATE emails SET is_deleted = 1, pending_action = 'delete' WHERE id = ?",
+        [id],
+    )
+    .map_err(to_string_error)?;
+    state.sync_now.notify_one();
     Ok(())
 }
 
+// The password itself never goes to the UI, only whether one is saved
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> CommandResult<HashMap<String, String>> {
-    db::get_settings(&state.db.lock().unwrap()).map_err(to_string_error)
+    let mut settings = db::get_settings(&state.db.lock().unwrap()).map_err(to_string_error)?;
+    settings.remove("password");
+    let has_password = settings
+        .get("email")
+        .is_some_and(|email| secrets::get_password(email).is_some());
+    settings.insert("has_password".into(), if has_password { "1" } else { "0" }.into());
+    Ok(settings)
 }
 
+// A password in `settings` goes to the system password store; an empty one keeps the saved password
 #[tauri::command]
-async fn save_settings(state: State<'_, AppState>, settings: HashMap<String, String>) -> CommandResult<()> {
+async fn save_settings(state: State<'_, AppState>, mut settings: HashMap<String, String>) -> CommandResult<()> {
+    let password = settings.remove("password").filter(|p| !p.is_empty());
+    settings.remove("has_password");
     let conn = state.db.lock().unwrap();
+    if let Some(password) = password {
+        let email = match settings.get("email") {
+            Some(email) => email.clone(),
+            None => db::get_setting(&conn, "email")
+                .map_err(to_string_error)?
+                .ok_or("Nejdřív vyplňte email")?,
+        };
+        secrets::set_password(&email, &password)?;
+    }
     for (key, value) in &settings {
         db::set_setting(&conn, key, value).map_err(to_string_error)?;
     }
+    state.sync_now.notify_one();
     Ok(())
+}
+
+// Credentials for connecting to Seznam
+fn credentials(conn: &Connection) -> CommandResult<(String, String)> {
+    let email = db::get_setting(conn, "email")
+        .map_err(to_string_error)?
+        .ok_or("Email credentials not configured")?;
+    let password = secrets::get_password(&email).ok_or("Email credentials not configured")?;
+    Ok((email, password))
 }
 
 #[derive(Deserialize)]
@@ -171,10 +230,7 @@ struct SendEmailRequest {
 async fn send_email(state: State<'_, AppState>, email: SendEmailRequest) -> CommandResult<()> {
     let (from, password, in_reply_to) = {
         let conn = state.db.lock().unwrap();
-        let settings = db::get_settings(&conn).map_err(to_string_error)?;
-        let (Some(from), Some(password)) = (settings.get("email"), settings.get("password")) else {
-            return Err("Email credentials not configured".into());
-        };
+        let (from, password) = credentials(&conn)?;
         let in_reply_to = match email.reply_to_id {
             Some(id) => conn
                 .query_row("SELECT message_id FROM emails WHERE id = ?", [id], |r| r.get::<_, String>(0))
@@ -182,7 +238,7 @@ async fn send_email(state: State<'_, AppState>, email: SendEmailRequest) -> Comm
                 .map_err(to_string_error)?,
             None => None,
         };
-        (from.clone(), password.clone(), in_reply_to)
+        (from, password, in_reply_to)
     };
 
     // Ensure a reply's subject starts with Re:
@@ -191,19 +247,33 @@ async fn send_email(state: State<'_, AppState>, email: SendEmailRequest) -> Comm
         subject = format!("Re: {subject}");
     }
 
-    smtp::send_email(smtp::OutgoingEmail {
-        from,
-        password,
+    let sent = smtp::send_email(smtp::OutgoingEmail {
+        from: from.clone(),
+        password: password.clone(),
         to: email.to,
         subject,
         text: email.text,
         in_reply_to,
     })
-    .await
+    .await?;
+
+    // The email is sent; saving the copy can finish in the background
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = imap::save_to_sent(&from, &password, &sent.message_id, &sent.raw).await {
+            log::error!("Could not save the sent email to the Sent folder: {e}");
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
 async fn test_connection(email: String, password: String) -> CommandResult<()> {
+    // An empty password means "use the saved one"
+    let password = if password.is_empty() {
+        secrets::get_password(&email).ok_or("Vyplňte heslo")?
+    } else {
+        password
+    };
     let mut session = imap::connect(&email, &password).await?;
     let _ = session.logout().await;
     Ok(())
@@ -265,6 +335,80 @@ async fn reprocess_emails(state: State<'_, AppState>) -> CommandResult<usize> {
     .map_err(to_string_error)?
 }
 
+// Links from emails open in the default browser; only web addresses are allowed
+#[tauri::command]
+async fn open_link(url: String) -> CommandResult<()> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("Tento odkaz nelze otevřít".into());
+    }
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(to_string_error)
+}
+
+fn load_attachment(state: &State<'_, AppState>, email_id: i64, index: usize) -> CommandResult<(String, Vec<u8>)> {
+    let raw: Vec<u8> = state
+        .db
+        .lock()
+        .unwrap()
+        .query_row("SELECT raw_content FROM emails WHERE id = ?", [email_id], |r| r.get(0))
+        .map_err(to_string_error)?;
+    parse::attachment(&raw, index).ok_or_else(|| "Přílohu se nepodařilo najít".to_string())
+}
+
+// Open an attachment in its default program, from a copy in the app's cache folder
+#[tauri::command]
+async fn open_attachment(app: tauri::AppHandle, state: State<'_, AppState>, email_id: i64, index: usize) -> CommandResult<()> {
+    let (file_name, contents) = load_attachment(&state, email_id, index)?;
+    if parse::is_risky_to_open(&file_name) {
+        return Err("Tuto přílohu nelze otevřít, mohla by spustit program.".into());
+    }
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(to_string_error)?
+        .join("attachments")
+        .join(format!("{email_id}-{index}"));
+    std::fs::create_dir_all(&dir).map_err(to_string_error)?;
+    let path = dir.join(&file_name);
+    std::fs::write(&path, contents).map_err(to_string_error)?;
+    tauri_plugin_opener::open_path(&path, None::<&str>).map_err(to_string_error)
+}
+
+// Save an attachment to the Downloads folder and show it there. Returns the saved file name.
+#[tauri::command]
+async fn save_attachment(app: tauri::AppHandle, state: State<'_, AppState>, email_id: i64, index: usize) -> CommandResult<String> {
+    let (file_name, contents) = load_attachment(&state, email_id, index)?;
+    let dir = app.path().download_dir().map_err(to_string_error)?;
+    // Never overwrite: faktura.pdf, faktura (2).pdf, faktura (3).pdf, …
+    let (stem, extension) = match file_name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
+        _ => (file_name.clone(), String::new()),
+    };
+    let mut path = dir.join(&file_name);
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}){extension}"));
+        n += 1;
+    }
+    std::fs::write(&path, contents).map_err(to_string_error)?;
+    let _ = tauri_plugin_opener::reveal_item_in_dir(&path);
+    Ok(path.file_name().unwrap_or_default().to_string_lossy().into_owned())
+}
+
+// Earlier versions kept the password in the database; move it to the system password store
+fn move_password_out_of_database(conn: &Connection) {
+    let (Ok(Some(email)), Ok(Some(password))) = (db::get_setting(conn, "email"), db::get_setting(conn, "password")) else {
+        return;
+    };
+    match secrets::set_password(&email, &password) {
+        Ok(()) => {
+            let _ = conn.execute("DELETE FROM settings WHERE key = 'password'", []);
+            log::info!("Moved the password to the system password store");
+        }
+        Err(e) => log::error!("{e}"),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -276,9 +420,12 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let db = Arc::new(Mutex::new(db::open(&data_dir.join("dadmail.db"))?));
+            let conn = db::open(&data_dir.join("dadmail.db"))?;
+            move_password_out_of_database(&conn);
+            let db = Arc::new(Mutex::new(conn));
             log::info!("Database initialized at {}", data_dir.display());
-            app.manage(AppState { db: db.clone() });
+            let sync_now = Arc::new(Notify::new());
+            app.manage(AppState { db: db.clone(), sync_now: sync_now.clone() });
 
             // Fit the window to the screen; Windows laptops with display scaling
             // often have less than 1200x800 of usable space
@@ -293,7 +440,7 @@ pub fn run() {
                 }
             }
 
-            tauri::async_runtime::spawn(imap::run_sync_loop(app.handle().clone(), db));
+            tauri::async_runtime::spawn(imap::run_sync_loop(app.handle().clone(), db, sync_now));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -306,6 +453,9 @@ pub fn run() {
             test_connection,
             clear_emails,
             reprocess_emails,
+            open_link,
+            open_attachment,
+            save_attachment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DadMail");

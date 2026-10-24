@@ -1,20 +1,44 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
 
-function Compose({ replyTo, onClose, onSent }) {
-  const [to, setTo] = useState('');
-  const [subject, setSubject] = useState('');
-  const [text, setText] = useState('');
+// The original email under the reply, each line prefixed with "> "
+function quoteOriginal(email) {
+  const date = new Date(email.date * 1000).toLocaleString('cs-CZ', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+  const sender = email.from_name ? `${email.from_name} <${email.from_addr}>` : email.from_addr;
+  const quoted = (email.body_text || '')
+    .trim()
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
+  return `\n\nDne ${date} napsal(a) ${sender}:\n${quoted}`;
+}
+
+function Compose({ replyTo, initialTo = '', onClose, onSent }) {
+  const textRef = useRef(null);
+  // The window is created fresh each time it opens, so a reply can be filled in right away
+  const [to, setTo] = useState(replyTo ? replyTo.from_addr : initialTo);
+  const [subject, setSubject] = useState(() => {
+    if (!replyTo) return '';
+    return replyTo.subject.startsWith('Re:') ? replyTo.subject : `Re: ${replyTo.subject}`;
+  });
+  const [text, setText] = useState(() => (replyTo ? quoteOriginal(replyTo) : ''));
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
 
+  // Start typing above the quoted email
   useEffect(() => {
-    if (replyTo) {
-      setTo(replyTo.from_addr);
-      setSubject(replyTo.subject.startsWith('Re:') ? replyTo.subject : `Re: ${replyTo.subject}`);
-      setText('');  // Start with empty text, no quoted message
-    }
-  }, [replyTo]);
+    const textarea = textRef.current;
+    if (!textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(0, 0);
+    textarea.scrollTop = 0;
+  }, []);
 
   const handleSend = async () => {
     if (!to.trim() || !subject.trim() || !text.trim()) {
@@ -87,6 +111,7 @@ function Compose({ replyTo, onClose, onSent }) {
           </div>
 
           <textarea
+            ref={textRef}
             value={text}
             onChange={(e) => setText(e.target.value)}
             className="w-full px-2 py-2 text-sm border border-gray-300 rounded focus:outline-none focus:border-blue-500 h-48 resize-none"

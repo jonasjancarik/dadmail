@@ -4,7 +4,7 @@ export default defineConfig({
   build: {
     format: 'es',
     rollupOptions: {
-      external: ['electron', 'better-sqlite3', 'imap-simple', 'mailparser', 'nodemailer', 'dompurify', 'jsdom'],
+      external: ['electron', 'better-sqlite3', 'imap-simple', 'mailparser', 'nodemailer'],
     },
   },
   resolve: {

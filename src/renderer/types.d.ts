@@ -10,8 +10,8 @@ declare global {
       saveSettings: (settings: Record<string, string>) => Promise<{ success: boolean }>;
       sendEmail: (emailData: { to: string; subject: string; text: string; replyToId?: number }) => Promise<{ success: boolean; error?: string }>;
       testConnection: (credentials: { email: string; password: string }) => Promise<{ success: boolean; error?: string }>;
-      onEmailsUpdated: (callback: (count: number) => void) => void;
-      onSyncStatus: (callback: (status: { status: string; message: string; progress?: number }) => void) => void;
+      onEmailsUpdated: (callback: (count: number) => void) => () => void;
+      onSyncStatus: (callback: (status: { status: string; message: string; progress?: number }) => void) => () => void;
       clearEmails: () => Promise<{ success: boolean; error?: string }>;
       reprocessEmails: () => Promise<{ success: boolean; processed: number; error?: string }>;
     };

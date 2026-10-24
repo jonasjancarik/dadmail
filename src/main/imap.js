@@ -1,10 +1,5 @@
 import { connect } from 'imap-simple';
-import { simpleParser } from 'mailparser';
-import DOMPurify from 'dompurify';
-import { JSDOM } from 'jsdom';
-
-const window = new JSDOM('').window;
-const purify = DOMPurify(window);
+import { parseRawEmail } from './parse.js';
 
 let syncInterval = null;
 let syncTimeout = null;
@@ -235,6 +230,20 @@ async function syncEmails(db, onUpdate) {
     
     const imap = connection.imap;
     let newCount = 0;
+
+    const insertStmt = db.prepare(`
+      INSERT OR IGNORE INTO emails (
+        message_id, from_addr, from_name, to_addr, subject,
+        body_html, body_text, preview, raw_content, date, thread_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const insertBatch = db.transaction((rows) => {
+      for (const row of rows) {
+        if (insertStmt.run(...row).changes > 0) {
+          newCount++;
+        }
+      }
+    });
     let reachedDateLimit = false;
     let lowestSeqProcessed = oldestSyncedSeq || totalMessages + 1;
     
@@ -371,75 +380,35 @@ async function syncEmails(db, onUpdate) {
             fetch.once('end', () => resolve(results));
           });
           
+          // Parse the whole batch first, then write it in a single transaction
+          const rows = [];
           for (const msg of fetchResults) {
             try {
               if (!msg.raw || msg.raw.length === 0) continue;
-              
+
               const uid = msg.uid;
               const batchItem = batch.find(b => b.uid === uid);
-              
-              // Parse email with mailparser
-              const parsed = await simpleParser(msg.raw);
-              
-              // Extract from info
-              const from = parsed.from?.value?.[0] || {};
-              const fromAddr = from.address || 'unknown@unknown';
-              const fromName = from.name || fromAddr.split('@')[0];
-              
-              // Extract to info
-              const to = parsed.to?.value?.[0] || {};
-              const toAddr = to.address || 'unknown@unknown';
-              
-              const subject = parsed.subject || '(Bez předmětu)';
-              const date = parsed.date ? Math.floor(parsed.date.getTime() / 1000) : Math.floor(Date.now() / 1000);
-              const messageId = parsed.messageId || batchItem?.messageId || `uid-${uid}`;
-              const inReplyTo = parsed.inReplyTo || null;
-              
-              // Get body - mailparser extracts and decodes it properly
-              let bodyText = parsed.text || '';
-              let bodyHtml = parsed.html || '';
-              
-              // Sanitize HTML
-              if (bodyHtml) {
-                bodyHtml = purify.sanitize(bodyHtml, {
-                  ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'b', 'i', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'span', 'table', 'tr', 'td', 'th', 'thead', 'tbody', 'img', 'hr', 'blockquote', 'pre', 'code'],
-                  ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'width', 'height', 'style'],
-                  ALLOW_DATA_ATTR: false,
-                });
-              }
-              
-              if (!bodyText && !bodyHtml) {
-                bodyText = '(Email nemá textový obsah)';
-              }
-              
-              const insertStmt = db.prepare(`
-                INSERT OR IGNORE INTO emails (
-                  message_id, from_addr, from_name, to_addr, subject,
-                  body_html, body_text, raw_content, date, thread_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              `);
-              
-              const result = insertStmt.run(
-                messageId,
-                fromAddr,
-                fromName,
-                toAddr,
-                subject,
-                bodyHtml,
-                bodyText,
+              const p = await parseRawEmail(msg.raw);
+
+              rows.push([
+                p.messageId || batchItem?.messageId || `uid-${uid}`,
+                p.fromAddr,
+                p.fromName,
+                p.toAddr,
+                p.subject,
+                p.bodyHtml,
+                p.bodyText,
+                p.preview,
                 msg.raw,  // Store raw email content
-                date,
-                inReplyTo
-              );
-              
-              if (result.changes > 0) {
-                newCount++;
-                // console.log(`Saved: ${subject.substring(0, 50)}`);
-              }
+                p.date ?? Math.floor(Date.now() / 1000),
+                p.inReplyTo,
+              ]);
             } catch (parseError) {
               console.error('Error parsing email:', parseError.message);
             }
           }
+
+          insertBatch(rows);
           
           // Update UI after each batch
           if (onUpdate && newCount > 0) {

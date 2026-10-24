@@ -1,4 +1,11 @@
 import { useEffect, useRef } from 'react';
+import DOMPurify from 'dompurify';
+
+const SANITIZE_OPTIONS = {
+  ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'b', 'i', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'span', 'table', 'tr', 'td', 'th', 'thead', 'tbody', 'img', 'hr', 'blockquote', 'pre', 'code'],
+  ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'width', 'height', 'style'],
+  ALLOW_DATA_ATTR: false,
+};
 
 function EmailView({ email, onReply, onDelete }) {
   const iframeRef = useRef(null);
@@ -50,7 +57,7 @@ function EmailView({ email, onReply, onDelete }) {
               </style>
             </head>
             <body>
-              ${email.body_html}
+              ${DOMPurify.sanitize(email.body_html, SANITIZE_OPTIONS)}
             </body>
           </html>
         `);
@@ -75,10 +82,12 @@ function EmailView({ email, onReply, onDelete }) {
                 }
               </style>
             </head>
-            <body>${email.body_text}</body>
+            <body></body>
           </html>
         `);
         doc.close();
+        // Plain text goes in as text, so anything that looks like HTML is shown literally
+        doc.body.textContent = email.body_text;
       }
     }
   }, [email]);

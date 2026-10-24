@@ -4,6 +4,7 @@ import { dirname, join } from 'path';
 import { initDatabase } from './db.js';
 import { startImapSync } from './imap.js';
 import { sendEmail } from './smtp.js';
+import { parseRawEmail } from './parse.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -101,25 +102,41 @@ ipcMain.handle('get-emails', async (event, searchQuery = '') => {
   if (!db) {
     return [];
   }
-  const stmt = db.prepare(`
-    SELECT * FROM emails 
-    WHERE is_deleted = 0 
-    ${searchQuery ? 'AND (subject LIKE ? OR body_text LIKE ? OR from_name LIKE ?)' : ''}
-    ORDER BY date DESC
-  `);
-  
-  if (searchQuery) {
-    const searchTerm = `%${searchQuery}%`;
-    return stmt.all(searchTerm, searchTerm, searchTerm);
+  // Only the columns the list shows; full bodies are loaded by get-email when opened
+  const listColumns = 'e.id, e.from_addr, e.from_name, e.subject, e.preview, e.date, e.is_read';
+  const ftsQuery = toFtsQuery(searchQuery);
+
+  if (ftsQuery) {
+    return db.prepare(`
+      SELECT ${listColumns} FROM emails_fts
+      JOIN emails e ON e.id = emails_fts.rowid
+      WHERE emails_fts MATCH ? AND e.is_deleted = 0
+      ORDER BY e.date DESC
+    `).all(ftsQuery);
   }
-  return stmt.all();
+  return db.prepare(`
+    SELECT ${listColumns} FROM emails e
+    WHERE e.is_deleted = 0
+    ORDER BY e.date DESC
+  `).all();
 });
+
+// Turn what the user typed into an FTS5 query: every word must match,
+// each as a prefix, with FTS syntax characters treated as plain text
+function toFtsQuery(searchQuery) {
+  const words = (searchQuery || '').trim().split(/\s+/).filter(Boolean);
+  return words.map(word => `"${word.replace(/"/g, '""')}"*`).join(' ');
+}
 
 ipcMain.handle('get-email', async (event, id) => {
   if (!db) {
     return null;
   }
-  const stmt = db.prepare('SELECT * FROM emails WHERE id = ?');
+  const stmt = db.prepare(`
+    SELECT id, message_id, from_addr, from_name, to_addr, subject,
+      body_html, body_text, date, is_read, thread_id
+    FROM emails WHERE id = ?
+  `);
   const email = stmt.get(id);
   
   // Mark as read
@@ -217,53 +234,24 @@ ipcMain.handle('reprocess-emails', async () => {
     return { success: false, processed: 0 };
   }
   try {
-    const { simpleParser } = await import('mailparser');
-    const { JSDOM } = await import('jsdom');
-    const DOMPurify = (await import('dompurify')).default;
-    const window = new JSDOM('').window;
-    const purify = DOMPurify(window);
-    
-    // Get all emails with raw content
-    const emails = db.prepare('SELECT id, raw_content FROM emails WHERE raw_content IS NOT NULL').all();
+    const ids = db.prepare('SELECT id FROM emails WHERE raw_content IS NOT NULL').all();
+    const getRaw = db.prepare('SELECT raw_content FROM emails WHERE id = ?');
+    const updateStmt = db.prepare(`
+      UPDATE emails SET
+        from_addr = ?, from_name = ?, to_addr = ?, subject = ?,
+        body_html = ?, body_text = ?, preview = ?
+      WHERE id = ?
+    `);
     let processed = 0;
-    
-    for (const email of emails) {
+
+    // Load one raw email at a time instead of all of them into memory
+    for (const { id } of ids) {
       try {
-        const parsed = await simpleParser(email.raw_content);
-        
-        const from = parsed.from?.value?.[0] || {};
-        const fromAddr = from.address || 'unknown@unknown';
-        const fromName = from.name || fromAddr.split('@')[0];
-        
-        const to = parsed.to?.value?.[0] || {};
-        const toAddr = to.address || 'unknown@unknown';
-        
-        const subject = parsed.subject || '(Bez předmětu)';
-        let bodyText = parsed.text || '';
-        let bodyHtml = parsed.html || '';
-        
-        if (bodyHtml) {
-          bodyHtml = purify.sanitize(bodyHtml, {
-            ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'b', 'i', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'span', 'table', 'tr', 'td', 'th', 'thead', 'tbody', 'img', 'hr', 'blockquote', 'pre', 'code'],
-            ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'width', 'height', 'style'],
-            ALLOW_DATA_ATTR: false,
-          });
-        }
-        
-        if (!bodyText && !bodyHtml) {
-          bodyText = '(Email nemá textový obsah)';
-        }
-        
-        db.prepare(`
-          UPDATE emails SET 
-            from_addr = ?, from_name = ?, to_addr = ?, subject = ?,
-            body_html = ?, body_text = ?
-          WHERE id = ?
-        `).run(fromAddr, fromName, toAddr, subject, bodyHtml, bodyText, email.id);
-        
+        const p = await parseRawEmail(getRaw.get(id).raw_content);
+        updateStmt.run(p.fromAddr, p.fromName, p.toAddr, p.subject, p.bodyHtml, p.bodyText, p.preview, id);
         processed++;
       } catch (e) {
-        console.error(`Error reprocessing email ${email.id}:`, e.message);
+        console.error(`Error reprocessing email ${id}:`, e.message);
       }
     }
     

@@ -1,5 +1,10 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 
+// Every row is one line of text, so rows have a fixed height and only the
+// rows in view (plus a few extra) need to be rendered
+const ROW_HEIGHT = 33;
+const OVERSCAN = 10;
+
 function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
   const [sortField, setSortField] = useState('date');
   const [sortDirection, setSortDirection] = useState('desc');
@@ -11,6 +16,19 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
     preview: null, // null = flex
     date: 140,
   });
+  
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const resizeObserver = useRef(null);
+  
+  // Callback ref: the scroll container only exists once there are emails to show
+  const scrollContainerRef = useCallback((node) => {
+    resizeObserver.current?.disconnect();
+    if (!node) return;
+    setViewportHeight(node.clientHeight);
+    resizeObserver.current = new ResizeObserver(() => setViewportHeight(node.clientHeight));
+    resizeObserver.current.observe(node);
+  }, []);
   
   const resizingCol = useRef(null);
   const startX = useRef(0);
@@ -85,16 +103,8 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
     });
   }, [emails, sortField, sortDirection]);
 
-  const getPreview = (email) => {
-    let text = email.body_text || '';
-    text = text.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
-    text = text.replace(/\[?cid:[^\s\]]+\]?/gi, '');
-    text = text.replace(/https?:\/\/[^\s]+/g, '');
-    text = text.replace(/^(From|To|Subject|Date|Sent|Cc|Bcc):.*$/gim, '');
-    text = text.replace(/[-_]{3,}/g, ' ');
-    text = text.replace(/\s+/g, ' ').trim();
-    return text;
-  };
+  const firstRow = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+  const lastRow = Math.min(sortedEmails.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
 
   const formatDate = (timestamp) => {
     const date = new Date(timestamp * 1000);
@@ -155,7 +165,11 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
   }
 
   return (
-    <div className="h-full overflow-auto bg-white">
+    <div
+      ref={scrollContainerRef}
+      onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
+      className="h-full overflow-auto bg-white"
+    >
       <table className="w-full text-sm border-collapse" style={{ tableLayout: 'fixed' }}>
         <thead className="bg-gray-100 sticky top-0 border-b border-gray-300">
           <tr>
@@ -167,9 +181,11 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
           </tr>
         </thead>
         <tbody>
-          {sortedEmails.map((email) => (
+          {firstRow > 0 && <tr style={{ height: firstRow * ROW_HEIGHT }} />}
+          {sortedEmails.slice(firstRow, lastRow).map((email) => (
             <tr
               key={email.id}
+              style={{ height: ROW_HEIGHT }}
               onClick={() => onEmailClick(email.id)}
               className={`cursor-pointer border-b border-gray-100 hover:bg-blue-50 ${
                 selectedEmail?.id === email.id ? 'bg-blue-100' : ''
@@ -195,7 +211,7 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
                 {email.subject || '(Bez předmětu)'}
               </td>
               <td className="px-3 py-1.5 overflow-hidden text-ellipsis whitespace-nowrap text-gray-500 font-normal">
-                {getPreview(email) || '—'}
+                {email.preview || '—'}
               </td>
               <td 
                 className="px-3 py-1.5 whitespace-nowrap text-gray-600 text-right"
@@ -205,6 +221,9 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading }) {
               </td>
             </tr>
           ))}
+          {lastRow < sortedEmails.length && (
+            <tr style={{ height: (sortedEmails.length - lastRow) * ROW_HEIGHT }} />
+          )}
         </tbody>
       </table>
     </div>

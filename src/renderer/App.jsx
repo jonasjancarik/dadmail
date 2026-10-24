@@ -12,6 +12,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [replyToEmail, setReplyToEmail] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const searchQueryRef = useRef('');
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState({});
   const [syncStatus, setSyncStatus] = useState({ status: 'idle', message: '' });
@@ -51,6 +52,9 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    const unsubscribers = [];
+
     const init = async () => {
       let retries = 0;
       while (!window.electronAPI && retries < 10) {
@@ -66,8 +70,9 @@ function App() {
       
       await loadSettings();
       await loadEmails();
-      
-      window.electronAPI.onEmailsUpdated((count) => {
+      if (cancelled) return;
+
+      unsubscribers.push(window.electronAPI.onEmailsUpdated((count) => {
         loadEmails();
         if (count > 0) {
           setSyncStatus({ status: 'success', message: `+${count} nových` });
@@ -75,20 +80,29 @@ function App() {
             setSyncStatus(prev => prev.status === 'success' ? { status: 'idle', message: '' } : prev);
           }, 3000);
         }
-      });
-      
+      }));
+
       if (window.electronAPI.onSyncStatus) {
-        window.electronAPI.onSyncStatus((status) => {
+        unsubscribers.push(window.electronAPI.onSyncStatus((status) => {
           setSyncStatus(status);
-        });
+        }));
       }
     };
-    
+
     init();
+    return () => {
+      cancelled = true;
+      unsubscribers.forEach(unsubscribe => unsubscribe());
+    };
   }, []);
 
+  // Search once typing pauses instead of on every keystroke
   useEffect(() => {
-    loadEmails();
+    const timer = setTimeout(() => {
+      searchQueryRef.current = searchQuery;
+      loadEmails();
+    }, searchQuery ? 250 : 0);
+    return () => clearTimeout(timer);
   }, [searchQuery]);
 
   const loadSettings = async () => {
@@ -105,7 +119,8 @@ function App() {
     if (window.electronAPI) {
       setLoading(true);
       try {
-        const loadedEmails = await window.electronAPI.getEmails(searchQuery);
+        // Read the query from a ref so sync-triggered reloads keep the current search
+        const loadedEmails = await window.electronAPI.getEmails(searchQueryRef.current);
         setEmails(loadedEmails);
       } catch (error) {
         console.error('Error loading emails:', error);
@@ -119,7 +134,8 @@ function App() {
     if (window.electronAPI) {
       const email = await window.electronAPI.getEmail(emailId);
       setSelectedEmail(email);
-      loadEmails();
+      // Opening marks the email as read; update the list locally instead of reloading it
+      setEmails(prev => prev.map(e => (e.id === emailId && !e.is_read ? { ...e, is_read: 1 } : e)));
     }
   };
 

@@ -17,14 +17,12 @@ function Settings({ onClose }) {
   }, []);
 
   const loadSettings = async () => {
-    if (api) {
-      const settings = await api.getSettings();
-      if (settings.email) {
-        setEmail(settings.email);
-      }
-      if (settings.sync_from_date) {
-        setSyncFromDate(settings.sync_from_date);
-      }
+    const settings = await api.getSettings();
+    if (settings.email) {
+      setEmail(settings.email);
+    }
+    if (settings.sync_from_date) {
+      setSyncFromDate(settings.sync_from_date);
     }
   };
 
@@ -39,17 +37,15 @@ function Settings({ onClose }) {
     setSuccess('');
 
     try {
-      if (api) {
-        const result = await api.testConnection({
-          email: email.trim(),
-          password: password.trim(),
-        });
+      const result = await api.testConnection({
+        email: email.trim(),
+        password: password.trim(),
+      });
 
-        if (result.success) {
-          setSuccess('Připojení úspěšné!');
-        } else {
-          setError('Připojení selhalo: ' + (result.error || 'Neznámá chyba'));
-        }
+      if (result.success) {
+        setSuccess('Připojení úspěšné!');
+      } else {
+        setError('Připojení selhalo: ' + (result.error || 'Neznámá chyba'));
       }
     } catch (err) {
       setError('Chyba: ' + err.message);
@@ -69,20 +65,18 @@ function Settings({ onClose }) {
     setSuccess('');
 
     try {
-      if (api) {
-        const settingsToSave = {
-          email: email.trim(),
-          password: password.trim(),
-        };
-        if (syncFromDate) {
-          settingsToSave.sync_from_date = syncFromDate;
-        }
-        await api.saveSettings(settingsToSave);
-        setSuccess('Nastavení uloženo!');
-        setTimeout(() => {
-          onClose();
-        }, 1000);
+      const settingsToSave = {
+        email: email.trim(),
+        password: password.trim(),
+      };
+      if (syncFromDate) {
+        settingsToSave.sync_from_date = syncFromDate;
       }
+      await api.saveSettings(settingsToSave);
+      setSuccess('Nastavení uloženo!');
+      setTimeout(() => {
+        onClose();
+      }, 1000);
     } catch (err) {
       setError('Chyba: ' + err.message);
     } finally {
@@ -189,13 +183,11 @@ function Settings({ onClose }) {
                   setError('');
                   setSuccess('');
                   try {
-                    if (api?.reprocessEmails) {
-                      const result = await api.reprocessEmails();
-                      if (result.success) {
-                        setSuccess(`Přeparsováno ${result.processed} emailů`);
-                      } else {
-                        setError('Chyba: ' + (result.error || 'Nepodařilo se'));
-                      }
+                    const result = await api.reprocessEmails();
+                    if (result.success) {
+                      setSuccess(`Přeparsováno ${result.processed} emailů`);
+                    } else {
+                      setError('Chyba: ' + (result.error || 'Nepodařilo se'));
                     }
                   } catch (err) {
                     setError('Chyba: ' + err.message);
@@ -221,13 +213,11 @@ function Settings({ onClose }) {
                   setError('');
                   setSuccess('');
                   try {
-                    if (api?.clearEmails) {
-                      const result = await api.clearEmails();
-                      if (result.success) {
-                        setSuccess('Emaily smazány. Synchronizace začne znovu.');
-                      } else {
-                        setError('Chyba: ' + (result.error || 'Nepodařilo se smazat'));
-                      }
+                    const result = await api.clearEmails();
+                    if (result.success) {
+                      setSuccess('Emaily smazány. Synchronizace začne znovu.');
+                    } else {
+                      setError('Chyba: ' + (result.error || 'Nepodařilo se smazat'));
                     }
                   } catch (err) {
                     setError('Chyba: ' + err.message);

@@ -1,10 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
-// The UI runs in both the Electron and the Tauri app. Both backends are
-// exposed through the Electron preload's shape (src/preload/preload.js).
+// Calls into the Rust backend (src-tauri/src/lib.rs)
 
-// Run a Tauri command and report the result the way the Electron handlers do
+// Run a command and report whether it worked, for actions that show a success or error message
 async function withStatus(command, args, extra = (value) => ({})) {
   try {
     const value = await invoke(command, args);
@@ -14,13 +13,13 @@ async function withStatus(command, args, extra = (value) => ({})) {
   }
 }
 
-// Subscribe to a Tauri event; returns a function that removes the listener
+// Subscribe to a backend event; returns a function that removes the listener
 function subscribe(event, callback) {
   const unlisten = listen(event, (e) => callback(e.payload));
   return () => unlisten.then((stop) => stop());
 }
 
-const tauriAPI = {
+export const api = {
   getEmails: (searchQuery) => invoke('get_emails', { searchQuery }),
   getEmail: (id) => invoke('get_email', { id }),
   deleteEmail: (id) => withStatus('delete_email', { id }),
@@ -33,5 +32,3 @@ const tauriAPI = {
   clearEmails: () => withStatus('clear_emails'),
   reprocessEmails: () => withStatus('reprocess_emails', {}, (processed) => ({ processed })),
 };
-
-export const api = window.__TAURI_INTERNALS__ ? tauriAPI : window.electronAPI;

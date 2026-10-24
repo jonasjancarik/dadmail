@@ -26,19 +26,17 @@ function Compose({ replyTo, onClose, onSent }) {
     setError('');
 
     try {
-      if (api) {
-        const result = await api.sendEmail({
-          to: to.trim(),
-          subject: subject.trim(),
-          text: text.trim(),
-          replyToId: replyTo?.id || null,
-        });
+      const result = await api.sendEmail({
+        to: to.trim(),
+        subject: subject.trim(),
+        text: text.trim(),
+        replyToId: replyTo?.id || null,
+      });
 
-        if (result.success) {
-          onSent();
-        } else {
-          setError(result.error || 'Chyba při odesílání');
-        }
+      if (result.success) {
+        onSent();
+      } else {
+        setError(result.error || 'Chyba při odesílání');
       }
     } catch (err) {
       setError('Chyba: ' + err.message);

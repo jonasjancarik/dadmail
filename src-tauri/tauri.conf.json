@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "com.github.jonasjancarik.dadmail",
   "build": {
-    "frontendDist": "../.vite/renderer/main_window",
+    "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeDevCommand": "npx vite --config vite.renderer.config.js",
-    "beforeBuildCommand": "npx vite build --config vite.renderer.config.js"
+    "beforeDevCommand": "npx vite",
+    "beforeBuildCommand": "npx vite build"
   },
   "app": {
     "windows": [

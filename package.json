@@ -2,43 +2,26 @@
   "name": "dadmail",
   "version": "1.0.0",
   "description": "Simple email client for Dad",
-  "main": ".vite/build/main.js",
+  "type": "module",
   "scripts": {
-    "dev": "electron-forge start",
-    "build": "electron-forge package",
-    "make": "electron-forge make",
-    "publish": "electron-forge publish",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
   },
   "keywords": [],
   "author": "",
   "license": "MIT",
   "devDependencies": {
-    "@electron-forge/cli": "^7.2.0",
-    "@electron-forge/maker-deb": "^7.2.0",
-    "@electron-forge/maker-rpm": "^7.2.0",
-    "@electron-forge/maker-squirrel": "^7.2.0",
-    "@electron-forge/maker-zip": "^7.2.0",
-    "@electron-forge/plugin-auto-unpack-natives": "^7.2.0",
-    "@electron-forge/plugin-fuses": "^7.2.0",
-    "@electron-forge/plugin-vite": "^7.2.0",
-    "@electron/fuses": "^1.6.0",
     "@tauri-apps/cli": "^2.12.4",
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.16",
-    "electron": "^28.0.0",
     "postcss": "^8.4.32",
-    "tailwindcss": "^3.4.0"
+    "tailwindcss": "^3.4.0",
+    "vite": "^7.2.6"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.4",
-    "better-sqlite3": "^9.2.2",
     "dompurify": "^3.0.6",
-    "electron-squirrel-startup": "^1.0.1",
-    "imap-simple": "^5.1.0",
-    "mailparser": "^3.6.5",
-    "nodemailer": "^6.9.8",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   }

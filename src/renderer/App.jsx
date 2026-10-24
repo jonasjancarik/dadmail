@@ -57,12 +57,6 @@ function App() {
     const unsubscribers = [];
 
     const init = async () => {
-      if (!api) {
-        console.error('No Electron or Tauri backend available');
-        setLoading(false);
-        return;
-      }
-      
       await loadSettings();
       await loadEmails();
       if (cancelled) return;
@@ -101,37 +95,31 @@ function App() {
   }, [searchQuery]);
 
   const loadSettings = async () => {
-    if (api) {
-      const loadedSettings = await api.getSettings();
-      setSettings(loadedSettings);
-      if (!loadedSettings.email || !loadedSettings.password) {
-        setShowSettings(true);
-      }
+    const loadedSettings = await api.getSettings();
+    setSettings(loadedSettings);
+    if (!loadedSettings.email || !loadedSettings.password) {
+      setShowSettings(true);
     }
   };
 
   const loadEmails = async () => {
-    if (api) {
-      setLoading(true);
-      try {
-        // Read the query from a ref so sync-triggered reloads keep the current search
-        const loadedEmails = await api.getEmails(searchQueryRef.current);
-        setEmails(loadedEmails);
-      } catch (error) {
-        console.error('Error loading emails:', error);
-      } finally {
-        setLoading(false);
-      }
+    setLoading(true);
+    try {
+      // Read the query from a ref so sync-triggered reloads keep the current search
+      const loadedEmails = await api.getEmails(searchQueryRef.current);
+      setEmails(loadedEmails);
+    } catch (error) {
+      console.error('Error loading emails:', error);
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleEmailClick = async (emailId) => {
-    if (api) {
-      const email = await api.getEmail(emailId);
-      setSelectedEmail(email);
-      // Opening marks the email as read; update the list locally instead of reloading it
-      setEmails(prev => prev.map(e => (e.id === emailId && !e.is_read ? { ...e, is_read: 1 } : e)));
-    }
+    const email = await api.getEmail(emailId);
+    setSelectedEmail(email);
+    // Opening marks the email as read; update the list locally instead of reloading it
+    setEmails(prev => prev.map(e => (e.id === emailId && !e.is_read ? { ...e, is_read: 1 } : e)));
   };
 
   const handleReply = (email) => {
@@ -151,20 +139,12 @@ function App() {
   };
 
   const handleDelete = async () => {
-    if (selectedEmail && api) {
+    if (selectedEmail) {
       await api.deleteEmail(selectedEmail.id);
       setSelectedEmail(null);
       loadEmails();
     }
   };
-
-  if (!api && loading) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-gray-100">
-        <div className="text-gray-500">Načítání...</div>
-      </div>
-    );
-  }
 
   if (showSettings) {
     return (

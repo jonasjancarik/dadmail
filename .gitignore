@@ -10,9 +10,7 @@ lerna-debug.log*
 node_modules/
 
 # Build outputs
-out/
 dist/
-.vite/
 
 # Database
 data/

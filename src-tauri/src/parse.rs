@@ -266,6 +266,13 @@ TVo=\r
     }
 
     #[test]
+    fn preview_is_one_short_line_without_links_or_quoted_headers() {
+        let body = "Ahoj tati,\n\nposílám fotky https://example.com/foto?id=1\n\nFrom: Jan\nSubject: x\n----------\nPa";
+        assert_eq!(make_preview(body), "Ahoj tati, posílám fotky Pa");
+        assert_eq!(make_preview(&"á".repeat(500)).chars().count(), 200);
+    }
+
+    #[test]
     fn text_only_email_has_no_html() {
         let raw = b"From: a@b.cz\r\nSubject: x\r\n\r\nAhoj <b>tati</b>\r\n";
         let parsed = parse_raw_email(raw).unwrap();

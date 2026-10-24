@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { api } from '../api';
+import { handleZoomKey } from '../zoom';
 
 const SANITIZE_OPTIONS = {
   ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'b', 'i', 'u', 'a', 'ul', 'ol', 'li', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div', 'span', 'table', 'tr', 'td', 'th', 'thead', 'tbody', 'img', 'hr', 'blockquote', 'pre', 'code'],
@@ -113,6 +114,7 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
     doc.querySelectorAll('a[href]').forEach((link) => {
       link.title = link.getAttribute('href');
     });
+    doc.addEventListener('keydown', handleZoomKey);
     // Links open in the browser; email addresses open a new email in DadMail
     doc.addEventListener('click', (event) => {
       const link = event.target.closest?.('a[href]');

@@ -22,7 +22,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
           subject TEXT NOT NULL,
           body_html TEXT,
           body_text TEXT,
-          raw_content BLOB,
+          raw_content BLOB, -- no longer used: original emails are in email_raw
           date INTEGER NOT NULL,
           is_read INTEGER DEFAULT 0,
           is_deleted INTEGER DEFAULT 0,
@@ -32,6 +32,14 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_date ON emails(date DESC);
         CREATE INDEX IF NOT EXISTS idx_is_deleted ON emails(is_deleted);
+        -- The original emails, kept apart so listing emails doesn't read through them
+        CREATE TABLE IF NOT EXISTS email_raw (
+          email_id INTEGER PRIMARY KEY,
+          raw BLOB NOT NULL
+        );
+        CREATE TRIGGER IF NOT EXISTS email_raw_delete AFTER DELETE ON emails BEGIN
+          DELETE FROM email_raw WHERE email_id = old.id;
+        END;
         CREATE TABLE IF NOT EXISTS settings (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
@@ -55,6 +63,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         }
     }
     db.execute("CREATE INDEX IF NOT EXISTS idx_uid ON emails(uid)", [])?;
+    move_raw_emails_out(&db)?;
     fill_missing_previews(&db)?;
 
     // Full-text search index, kept in sync with the emails table by triggers.
@@ -90,7 +99,33 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         log::info!("Built search index");
     }
 
+    // Fold the write-ahead log back into the database file, so it doesn't stay large
+    // after big changes such as the VACUUM above
+    db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+
     Ok(db)
+}
+
+// Earlier versions kept the original emails in emails.raw_content; move them to email_raw
+// and shrink the file once
+fn move_raw_emails_out(db: &Connection) -> rusqlite::Result<()> {
+    let has_raw: bool = db
+        .prepare("SELECT 1 FROM emails WHERE raw_content IS NOT NULL LIMIT 1")?
+        .exists([])?;
+    if !has_raw {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    let moved = tx.execute(
+        "INSERT OR IGNORE INTO email_raw (email_id, raw)
+         SELECT id, raw_content FROM emails WHERE raw_content IS NOT NULL",
+        [],
+    )?;
+    tx.execute("UPDATE emails SET raw_content = NULL WHERE raw_content IS NOT NULL", [])?;
+    tx.commit()?;
+    db.execute_batch("VACUUM")?;
+    log::info!("Moved {moved} original emails to their own table");
+    Ok(())
 }
 
 fn fill_missing_previews(db: &Connection) -> rusqlite::Result<()> {

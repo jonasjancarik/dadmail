@@ -25,7 +25,23 @@ npm run dev
 npm run build
 ```
 
-Instalátor pro Windows (`nsis`) je potřeba sestavit přímo na Windows.
+Sestavení podepisuje aktualizace, takže potřebuje soukromý klíč
+(vytvořený příkazem `npx tauri signer generate`, uložený v `~/.tauri/dadmail-updater.key`):
+
+```bash
+TAURI_SIGNING_PRIVATE_KEY="$(cat ~/.tauri/dadmail-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" npm run build
+```
+
+Instalátor pro Windows (`nsis`) je potřeba sestavit přímo na Windows. To dělá GitHub Actions
+(`.github/workflows/build.yml`) při každém pushi; instalátor je ke stažení u běhu workflow.
+Workflow potřebuje secret `TAURI_SIGNING_PRIVATE_KEY` s obsahem souboru s klíčem.
+
+## Vydání nové verze
+
+1. Zvyšte verzi v `package.json` (aplikace ji přebírá) a v `src-tauri/Cargo.toml`.
+2. Commitněte a pushněte tag, např. `git tag v0.2.0 && git push origin v0.2.0`.
+3. Workflow vytvoří GitHub release s instalátorem a souborem `latest.json`.
+   Nainstalovaná aplikace novou verzi najde po spuštění a nabídne „Aktualizovat“.
 
 Data aplikace jsou ve složce `com.github.jonasjancarik.dadmail`
 (na macOS v `~/Library/Application Support`, na Windows v `%APPDATA%`).

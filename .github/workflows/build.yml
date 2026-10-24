@@ -1,0 +1,57 @@
+name: Build
+
+# Every push builds the Windows installer (and a macOS app) and runs the tests.
+# Pushing a version tag such as v0.2.0 also publishes a GitHub release, which the
+# app's updater picks up (see plugins.updater in src-tauri/tauri.conf.json).
+#
+# Needs the repository secret TAURI_SIGNING_PRIVATE_KEY: the contents of
+# ~/.tauri/dadmail-updater.key, which signs the updates.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.platform }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Run tests
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
+        with:
+          # Only version tags create a release; other builds are kept as workflow artifacts
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+          releaseName: DadMail ${{ github.ref_name }}
+          releaseDraft: false
+          uploadUpdaterJson: true
+          updaterJsonPreferNsis: true
+          uploadWorkflowArtifacts: true

@@ -1,4 +1,5 @@
 mod db;
+mod errors;
 mod imap;
 mod parse;
 mod secrets;
@@ -9,7 +10,8 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use tauri::{LogicalSize, Manager, State};
+use tauri::{AppHandle, LogicalSize, Manager, State, UserAttentionType};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Notify;
 
 struct AppState {
@@ -50,6 +52,74 @@ struct Email {
     is_read: i64,
     thread_id: Option<String>,
     attachments: Vec<parse::AttachmentInfo>,
+}
+
+// Czech needs three forms: 1 nový email, 2–4 nové emaily, 5 nových emailů
+fn czech_count(n: i64, one: &str, few: &str, many: &str) -> String {
+    let form = match n {
+        1 => one,
+        2..=4 => few,
+        _ => many,
+    };
+    format!("{n} {form}")
+}
+
+// Unread count in the window title (shown on the Windows taskbar) and on the macOS dock icon
+pub(crate) fn update_unread_count(app: &AppHandle, conn: &Connection) {
+    let unread: i64 = conn
+        .query_row("SELECT count(*) FROM emails WHERE is_read = 0 AND is_deleted = 0", [], |r| r.get(0))
+        .unwrap_or(0);
+    let Some(window) = app.get_webview_window("main") else { return };
+    let title = if unread == 0 {
+        "DadMail".to_string()
+    } else {
+        format!(
+            "DadMail – {}",
+            czech_count(unread, "nepřečtený email", "nepřečtené emaily", "nepřečtených emailů")
+        )
+    };
+    let _ = window.set_title(&title);
+    #[cfg(target_os = "macos")]
+    let _ = window.set_badge_count((unread > 0).then_some(unread));
+}
+
+pub(crate) fn notify_new_mail(app: &AppHandle, emails: &[imap::NewEmail]) {
+    let (title, body) = match emails {
+        [email] => (format!("Nový email od {}", email.from), email.subject.clone()),
+        _ => {
+            let mut senders: Vec<&str> = Vec::new();
+            for email in emails {
+                if !senders.contains(&email.from.as_str()) {
+                    senders.push(&email.from);
+                }
+            }
+            let mut body = format!("Od: {}", senders.iter().take(3).copied().collect::<Vec<_>>().join(", "));
+            if senders.len() > 3 {
+                body.push_str(" a další");
+            }
+            (czech_count(emails.len() as i64, "nový email", "nové emaily", "nových emailů"), body)
+        }
+    };
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
+        log::error!("Could not show a notification: {e}");
+    }
+    // Also flash the taskbar button when DadMail is in the background
+    if let Some(window) = app.get_webview_window("main") {
+        if !window.is_focused().unwrap_or(true) {
+            let _ = window.request_user_attention(Some(UserAttentionType::Informational));
+        }
+    }
+}
+
+// Text size: the whole window is zoomed, email contents included. Saved between runs.
+#[tauri::command]
+async fn set_zoom(app: AppHandle, state: State<'_, AppState>, zoom: f64) -> CommandResult<f64> {
+    let zoom = zoom.clamp(0.8, 2.0);
+    if let Some(window) = app.get_webview_window("main") {
+        window.set_zoom(zoom).map_err(to_string_error)?;
+    }
+    db::set_setting(&state.db.lock().unwrap(), "zoom", &zoom.to_string()).map_err(to_string_error)?;
+    Ok(zoom)
 }
 
 // Turn what the user typed into an FTS5 query: every word must match,
@@ -106,12 +176,13 @@ async fn get_emails(state: State<'_, AppState>, search_query: Option<String>) ->
 }
 
 #[tauri::command]
-async fn get_email(state: State<'_, AppState>, id: i64) -> CommandResult<Option<Email>> {
+async fn get_email(app: AppHandle, state: State<'_, AppState>, id: i64) -> CommandResult<Option<Email>> {
     let conn = state.db.lock().unwrap();
     let row = conn
         .query_row(
             "SELECT id, message_id, from_addr, from_name, to_addr, subject,
-               body_html, body_text, date, is_read, thread_id, raw_content
+               body_html, body_text, date, is_read, thread_id,
+               (SELECT raw FROM email_raw WHERE email_id = emails.id)
              FROM emails WHERE id = ?",
             [id],
             |r| {
@@ -156,13 +227,14 @@ async fn get_email(state: State<'_, AppState>, id: i64) -> CommandResult<Option<
             [id],
         )
         .map_err(to_string_error)?;
+        update_unread_count(&app, &conn);
         state.sync_now.notify_one();
     }
     Ok(Some(email))
 }
 
 #[tauri::command]
-async fn delete_email(state: State<'_, AppState>, id: i64) -> CommandResult<()> {
+async fn delete_email(app: AppHandle, state: State<'_, AppState>, id: i64) -> CommandResult<()> {
     let conn = state.db.lock().unwrap();
     // Hidden here right away; the next sync moves it to the server's trash
     conn.execute(
@@ -170,6 +242,7 @@ async fn delete_email(state: State<'_, AppState>, id: i64) -> CommandResult<()> 
         [id],
     )
     .map_err(to_string_error)?;
+    update_unread_count(&app, &conn);
     state.sync_now.notify_one();
     Ok(())
 }
@@ -300,7 +373,7 @@ async fn reprocess_emails(state: State<'_, AppState>) -> CommandResult<usize> {
     tauri::async_runtime::spawn_blocking(move || {
         let ids: Vec<i64> = {
             let conn = db.lock().unwrap();
-            conn.prepare("SELECT id FROM emails WHERE raw_content IS NOT NULL")
+            conn.prepare("SELECT email_id FROM email_raw")
                 .map_err(to_string_error)?
                 .query_map([], |r| r.get(0))
                 .map_err(to_string_error)?
@@ -312,7 +385,7 @@ async fn reprocess_emails(state: State<'_, AppState>) -> CommandResult<usize> {
         for id in ids {
             let conn = db.lock().unwrap();
             let raw: Vec<u8> = conn
-                .query_row("SELECT raw_content FROM emails WHERE id = ?", [id], |r| r.get(0))
+                .query_row("SELECT raw FROM email_raw WHERE email_id = ?", [id], |r| r.get(0))
                 .map_err(to_string_error)?;
             let Some(p) = parse::parse_raw_email(&raw) else {
                 log::error!("Error reprocessing email {id}");
@@ -350,7 +423,7 @@ fn load_attachment(state: &State<'_, AppState>, email_id: i64, index: usize) -> 
         .db
         .lock()
         .unwrap()
-        .query_row("SELECT raw_content FROM emails WHERE id = ?", [email_id], |r| r.get(0))
+        .query_row("SELECT raw FROM email_raw WHERE email_id = ?", [email_id], |r| r.get(0))
         .map_err(to_string_error)?;
     parse::attachment(&raw, index).ok_or_else(|| "Přílohu se nepodařilo najít".to_string())
 }
@@ -395,6 +468,36 @@ async fn save_attachment(app: tauri::AppHandle, state: State<'_, AppState>, emai
     Ok(path.file_name().unwrap_or_default().to_string_lossy().into_owned())
 }
 
+// New versions are published as GitHub releases (see .github/workflows/build.yml).
+// Returns the new version number, if there is one.
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> CommandResult<Option<String>> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app.updater().map_err(to_string_error)?.check().await.map_err(|e| {
+        log::info!("Could not check for updates: {e}");
+        e.to_string()
+    })?;
+    Ok(update.map(|u| u.version))
+}
+
+// Download and install the new version, then start it
+#[tauri::command]
+async fn install_update(app: AppHandle) -> CommandResult<()> {
+    use tauri_plugin_updater::UpdaterExt;
+    let update = app
+        .updater()
+        .map_err(to_string_error)?
+        .check()
+        .await
+        .map_err(|e| errors::describe(&e.to_string()))?
+        .ok_or("Žádná nová verze není k dispozici.")?;
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| errors::describe(&e.to_string()))?;
+    app.restart();
+}
+
 // Earlier versions kept the password in the database; move it to the system password store
 fn move_password_out_of_database(conn: &Connection) {
     let (Ok(Some(email)), Ok(Some(password))) = (db::get_setting(conn, "email"), db::get_setting(conn, "password")) else {
@@ -412,6 +515,8 @@ fn move_password_out_of_database(conn: &Connection) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_log::Builder::default()
                 .level(log::LevelFilter::Info)
@@ -438,7 +543,12 @@ pub fn run() {
                     let _ = window.set_size(LogicalSize::new(width, height));
                     let _ = window.center();
                 }
+                let zoom = db::get_setting(&db.lock().unwrap(), "zoom").ok().flatten();
+                if let Some(zoom) = zoom.and_then(|z| z.parse::<f64>().ok()) {
+                    let _ = window.set_zoom(zoom);
+                }
             }
+            update_unread_count(app.handle(), &db.lock().unwrap());
 
             tauri::async_runtime::spawn(imap::run_sync_loop(app.handle().clone(), db, sync_now));
             Ok(())
@@ -456,7 +566,58 @@ pub fn run() {
             open_link,
             open_attachment,
             save_attachment,
+            set_zoom,
+            check_for_update,
+            install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running DadMail");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_words_become_safe_prefix_queries() {
+        assert_eq!(to_fts_query("  faktura  seznam "), "\"faktura\"* \"seznam\"*");
+        assert_eq!(to_fts_query("\"foo AND (bar"), "\"\"\"foo\"* \"AND\"* \"(bar\"*");
+        assert_eq!(to_fts_query("   "), "");
+    }
+
+    #[test]
+    fn czech_plurals() {
+        assert_eq!(czech_count(1, "nový email", "nové emaily", "nových emailů"), "1 nový email");
+        assert_eq!(czech_count(3, "nový email", "nové emaily", "nových emailů"), "3 nové emaily");
+        assert_eq!(czech_count(5, "nový email", "nové emaily", "nových emailů"), "5 nových emailů");
+        assert_eq!(czech_count(0, "nový email", "nové emaily", "nových emailů"), "0 nových emailů");
+    }
+
+    #[test]
+    fn search_finds_words_without_diacritics_and_by_prefix() {
+        let dir = std::env::temp_dir().join(format!("dadmail-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("search.db");
+        let _ = std::fs::remove_file(&path);
+        let conn = db::open(&path).unwrap();
+        conn.execute(
+            "INSERT INTO emails (message_id, from_addr, from_name, to_addr, subject, body_text, date)
+             VALUES ('<1@x>', 'a@b.cz', 'Banka', 'tata@seznam.cz', 'Výpis z účtu', 'Dobrý den, posíláme zprávu', 1)",
+            [],
+        )
+        .unwrap();
+        let hits = |q: &str| -> i64 {
+            conn.query_row(
+                "SELECT count(*) FROM emails_fts WHERE emails_fts MATCH ?",
+                [to_fts_query(q)],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(hits("zpravu"), 1);
+        assert_eq!(hits("vypis uctu"), 1);
+        assert_eq!(hits("ban"), 1);
+        assert_eq!(hits("faktura"), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

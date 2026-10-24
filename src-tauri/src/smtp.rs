@@ -22,7 +22,7 @@ pub async fn send_email(email: OutgoingEmail) -> Result<SentEmail, String> {
     let mut builder = Message::builder()
         .message_id(None)
         .from(email.from.parse().map_err(|e| format!("Neplatný odesílatel: {e}"))?)
-        .to(email.to.parse().map_err(|e| format!("Neplatný příjemce: {e}"))?)
+        .to(email.to.parse().map_err(|_| crate::errors::BAD_RECIPIENT.to_string())?)
         .subject(email.subject);
     if let Some(id) = email.in_reply_to {
         builder = builder.in_reply_to(id.clone()).references(id);
@@ -41,6 +41,9 @@ pub async fn send_email(email: OutgoingEmail) -> Result<SentEmail, String> {
         message_id: message.headers().get_raw("Message-ID").unwrap_or_default().to_string(),
         raw: message.formatted(),
     };
-    mailer.send(message).await.map_err(|e| e.to_string())?;
+    mailer
+        .send(message)
+        .await
+        .map_err(|e| crate::errors::describe(&e.to_string()))?;
     Ok(sent)
 }

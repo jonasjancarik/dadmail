@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api';
+import { ZOOM_LEVELS, getZoom, setZoom } from '../zoom';
 
 function Settings({ onClose }) {
   const [email, setEmail] = useState('');
@@ -7,6 +8,7 @@ function Settings({ onClose }) {
   // The saved password is never sent to this screen, only which email it belongs to
   const [savedPasswordFor, setSavedPasswordFor] = useState(null);
   const [syncFromDate, setSyncFromDate] = useState('');
+  const [zoom, setZoomState] = useState(getZoom());
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -146,6 +148,24 @@ function Settings({ onClose }) {
             />
             <p className="mt-1 text-xs text-gray-500">
               Ponechte prázdné pro všechny emaily
+            </p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Velikost textu
+            </label>
+            <select
+              value={ZOOM_LEVELS.reduce((best, l) => (Math.abs(l.value - zoom) < Math.abs(best - zoom) ? l.value : best), 1)}
+              onChange={async (e) => setZoomState(await setZoom(parseFloat(e.target.value)))}
+              className="input-field"
+            >
+              {ZOOM_LEVELS.map((level) => (
+                <option key={level.value} value={level.value}>{level.label}</option>
+              ))}
+            </select>
+            <p className="mt-1 text-xs text-gray-500">
+              Změna se projeví hned. Velikost jde měnit i klávesami Ctrl a + nebo Ctrl a −.
             </p>
           </div>
 

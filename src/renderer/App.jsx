@@ -5,6 +5,7 @@ import Compose from './components/Compose';
 import Settings from './components/Settings';
 import SearchBar from './components/SearchBar';
 import { api } from './api';
+import { initZoom, handleZoomKey } from './zoom';
 
 function App() {
   const [emails, setEmails] = useState([]);
@@ -18,6 +19,8 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [settings, setSettings] = useState({});
   const [syncStatus, setSyncStatus] = useState({ status: 'idle', message: '' });
+  // A newer DadMail version, and whether it is being installed
+  const [update, setUpdate] = useState(null);
   const [paneHeight, setPaneHeight] = useState(300); // pixels for top pane
   const isDraggingPane = useRef(false);
   const containerRef = useRef(null);
@@ -47,9 +50,11 @@ function App() {
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
+    document.addEventListener('keydown', handleZoomKey);
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
+      document.removeEventListener('keydown', handleZoomKey);
     };
   }, []);
 
@@ -80,7 +85,13 @@ function App() {
     };
 
     init();
+    // Look for a new version shortly after start, once the inbox has loaded
+    const updateTimer = setTimeout(async () => {
+      const version = await api.checkForUpdate();
+      if (version && !cancelled) setUpdate({ version, installing: false, error: null });
+    }, 10000);
     return () => {
+      clearTimeout(updateTimer);
       cancelled = true;
       unsubscribers.forEach(unsubscribe => unsubscribe());
     };
@@ -98,6 +109,7 @@ function App() {
   const loadSettings = async () => {
     const loadedSettings = await api.getSettings();
     setSettings(loadedSettings);
+    initZoom(loadedSettings.zoom);
     if (!loadedSettings.email || loadedSettings.has_password !== '1') {
       setShowSettings(true);
     }
@@ -227,6 +239,29 @@ function App() {
           ⚙
         </button>
       </header>
+
+      {update && (
+        <div className="bg-blue-50 border-b border-blue-200 px-3 py-1.5 flex items-center gap-3 text-sm text-blue-900">
+          {update.installing ? (
+            <span>Stahuji novou verzi. DadMail se za chvíli sám znovu spustí…</span>
+          ) : (
+            <>
+              <span>Je připravená nová verze DadMail ({update.version}).</span>
+              <button
+                onClick={async () => {
+                  setUpdate({ ...update, installing: true, error: null });
+                  const result = await api.installUpdate();
+                  if (!result.success) setUpdate({ ...update, installing: false, error: result.error });
+                }}
+                className="px-2 py-0.5 bg-blue-600 text-white rounded hover:bg-blue-700"
+              >
+                Aktualizovat
+              </button>
+              {update.error && <span className="text-red-700">{update.error}</span>}
+            </>
+          )}
+        </div>
+      )}
 
       {/* Main Content - Vertical Split */}
       <div ref={containerRef} className="flex-1 flex flex-col overflow-hidden">

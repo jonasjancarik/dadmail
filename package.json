@@ -1,6 +1,6 @@
 {
   "name": "dadmail",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Simple email client for Dad",
   "type": "module",
   "scripts": {

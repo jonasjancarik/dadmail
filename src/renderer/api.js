@@ -32,6 +32,9 @@ export const api = {
   clearEmails: () => withStatus('clear_emails'),
   reprocessEmails: () => withStatus('reprocess_emails', {}, (processed) => ({ processed })),
   openLink: (url) => withStatus('open_link', { url }),
+  setZoom: (zoom) => invoke('set_zoom', { zoom }),
+  checkForUpdate: () => invoke('check_for_update').catch(() => null),
+  installUpdate: () => withStatus('install_update'),
   openAttachment: (emailId, index) => withStatus('open_attachment', { emailId, index }),
   saveAttachment: (emailId, index) => withStatus('save_attachment', { emailId, index }, (fileName) => ({ fileName })),
 };

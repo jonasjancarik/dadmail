@@ -14,7 +14,7 @@ use tokio::sync::Notify;
 
 use crate::db::{get_setting, get_settings, set_setting};
 use crate::parse::parse_raw_email;
-use crate::secrets;
+use crate::{errors, secrets};
 
 const IMAP_HOST: &str = "imap.seznam.cz";
 const IMAP_PORT: u16 = 993;
@@ -28,6 +28,12 @@ const EMAILS_PER_SYNC: usize = 50;
 const UIDS_PER_COMMAND: usize = 500;
 
 pub type ImapSession = Session<TlsStream<TcpStream>>;
+
+// A newly downloaded email, for the new-mail notification
+pub struct NewEmail {
+    pub from: String,
+    pub subject: String,
+}
 type Db = Arc<Mutex<Connection>>;
 
 pub async fn connect(email: &str, password: &str) -> Result<ImapSession, String> {
@@ -46,7 +52,8 @@ pub async fn connect(email: &str, password: &str) -> Result<ImapSession, String>
     };
     tokio::time::timeout(TIMEOUT, login)
         .await
-        .map_err(|_| "Server neodpovídá".to_string())?
+        .map_err(|_| errors::NO_CONNECTION.to_string())?
+        .map_err(|e| errors::describe(&e))
 }
 
 fn emit_status(app: &AppHandle, status: &str, message: &str, progress: Option<u32>) {
@@ -75,8 +82,7 @@ pub async fn run_sync_loop(app: AppHandle, db: Db, wake: Arc<Notify>) {
                 Duration::from_secs(27)
             }
             Err(error) => {
-                log::error!("Sync failed: {error}");
-                emit_status(&app, "error", &format!("Chyba: {error}"), None);
+                emit_status(&app, "error", &errors::describe(&error), None);
                 Duration::from_secs(10)
             }
         };
@@ -85,6 +91,25 @@ pub async fn run_sync_loop(app: AppHandle, db: Db, wake: Arc<Notify>) {
             _ = wake.notified() => {}
         }
     }
+}
+
+// Which emails to fetch this round, from the server's UIDs (sorted ascending) and how far
+// earlier syncs got. Returns (new emails, older emails).
+fn plan_sync(uids: &[u32], newest: Option<u32>, oldest: Option<u32>) -> (Vec<u32>, Vec<u32>) {
+    // 1. New emails since the last sync (on the first sync, just the newest batch)
+    let new_uids: Vec<u32> = match newest {
+        Some(newest) => uids.iter().copied().filter(|&u| u > newest).collect(),
+        None => uids[uids.len().saturating_sub(EMAILS_PER_SYNC)..].to_vec(),
+    };
+    // 2. Older emails, continuing backwards from where the last sync stopped
+    let history_uids: Vec<u32> = match oldest {
+        Some(oldest) => {
+            let older: Vec<u32> = uids.iter().copied().filter(|&u| u < oldest).collect();
+            older[older.len().saturating_sub(EMAILS_PER_SYNC)..].to_vec()
+        }
+        None => Vec::new(),
+    };
+    (new_uids, history_uids)
 }
 
 // IMAP SEARCH wants dates like 1-Jan-2024; the setting is stored as YYYY-MM-DD
@@ -307,10 +332,7 @@ async fn sync_emails(app: &AppHandle, db: &Db) -> Result<SyncOutcome, String> {
     };
 
     emit_status(app, "syncing", "Připojuji se k serveru...", None);
-    let mut session = connect(email, &password).await.map_err(|e| {
-        log::error!("Connection error: {e}");
-        "Nelze se připojit k serveru".to_string()
-    })?;
+    let mut session = connect(email, &password).await?;
     emit_status(app, "syncing", "Kontroluji schránku...", None);
 
     let mailbox = session.select("INBOX").await.map_err(|e| e.to_string())?;
@@ -385,24 +407,18 @@ async fn sync_emails(app: &AppHandle, db: &Db) -> Result<SyncOutcome, String> {
         (read("sync_newest_uid"), read("sync_oldest_uid"))
     };
 
-    // 1. New emails since the last sync (on the first sync, just the newest batch)
-    let new_uids: Vec<u32> = match newest {
-        Some(newest) => uids.iter().copied().filter(|&u| u > newest).collect(),
-        None => uids[uids.len().saturating_sub(EMAILS_PER_SYNC)..].to_vec(),
-    };
-    // 2. Older emails, continuing backwards from where the last sync stopped
-    let history_uids: Vec<u32> = match oldest {
-        Some(oldest) => {
-            let older: Vec<u32> = uids.iter().copied().filter(|&u| u < oldest).collect();
-            older[older.len().saturating_sub(EMAILS_PER_SYNC)..].to_vec()
-        }
-        None => Vec::new(),
-    };
+    let (new_uids, history_uids) = plan_sync(&uids, newest, oldest);
     log::info!("Sync plan: {} new, {} older", new_uids.len(), history_uids.len());
 
-    let mut new_count = 0;
-    fetch_uids(app, db, &mut session, &new_uids, "nové emaily", &mut new_count).await?;
-    fetch_uids(app, db, &mut session, &history_uids, "starší emaily", &mut new_count).await?;
+    let mut arrived = Vec::new();
+    fetch_uids(app, db, &mut session, &new_uids, "nové emaily", &mut arrived).await?;
+    let mut older = Vec::new();
+    fetch_uids(app, db, &mut session, &history_uids, "starší emaily", &mut older).await?;
+    let new_count = arrived.len() + older.len();
+    // Only mail that really just arrived, not the first download or older history
+    if newest.is_some() && !arrived.is_empty() {
+        crate::notify_new_mail(app, &arrived);
+    }
 
     let lowest_processed = new_uids
         .iter()
@@ -435,6 +451,7 @@ async fn sync_emails(app: &AppHandle, db: &Db) -> Result<SyncOutcome, String> {
     emit_status(app, "success", &message, None);
     // The UI reloads the list on this event, so only send it when something changed
     if new_count > 0 || server_changes > 0 {
+        crate::update_unread_count(app, &db.lock().unwrap());
         let _ = app.emit("emails-updated", new_count);
     }
 
@@ -448,7 +465,7 @@ async fn fetch_uids(
     session: &mut ImapSession,
     uids: &[u32],
     label: &str,
-    new_count: &mut usize,
+    new_emails: &mut Vec<NewEmail>,
 ) -> Result<(), String> {
     if uids.is_empty() {
         return Ok(());
@@ -523,9 +540,12 @@ async fn fetch_uids(
                     .prepare(
                         "INSERT OR IGNORE INTO emails (
                           message_id, from_addr, from_name, to_addr, subject,
-                          body_html, body_text, preview, raw_content, date, thread_id, uid
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          body_html, body_text, preview, date, thread_id, uid
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     )
+                    .map_err(|e| e.to_string())?;
+                let mut insert_raw = tx
+                    .prepare("INSERT INTO email_raw (email_id, raw) VALUES (?, ?)")
                     .map_err(|e| e.to_string())?;
                 for (p, envelope_id, raw, uid) in &rows {
                     let message_id = p
@@ -538,28 +558,70 @@ async fn fetch_uids(
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.as_secs() as i64)
                     });
-                    inserted += insert
+                    let added = insert
                         .execute(params![
                             message_id, p.from_addr, p.from_name, p.to_addr, p.subject,
-                            p.body_html, p.body_text, p.preview, raw, date, p.in_reply_to, uid
+                            p.body_html, p.body_text, p.preview, date, p.in_reply_to, uid
                         ])
                         .map_err(|e| e.to_string())?;
+                    if added > 0 {
+                        insert_raw
+                            .execute(params![tx.last_insert_rowid(), raw])
+                            .map_err(|e| e.to_string())?;
+                        new_emails.push(NewEmail {
+                            from: p.from_name.clone(),
+                            subject: p.subject.clone(),
+                        });
+                        inserted += 1;
+                    }
                 }
             }
             tx.commit().map_err(|e| e.to_string())?;
             inserted
         };
 
-        *new_count += inserted;
-        if *new_count > 0 {
+        let new_count = new_emails.len();
+        if inserted > 0 {
             emit_status(
                 app,
                 "syncing",
                 &format!("Načteno {new_count} emailů..."),
                 Some(progress),
             );
-            let _ = app.emit("emails-updated", *new_count);
+            let _ = app.emit("emails-updated", new_count);
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_sync_takes_the_newest_batch() {
+        let uids: Vec<u32> = (1..=120).collect();
+        let (new, older) = plan_sync(&uids, None, None);
+        assert_eq!(new, (71..=120).collect::<Vec<_>>());
+        assert!(older.is_empty());
+    }
+
+    #[test]
+    fn later_syncs_fetch_new_mail_and_continue_backwards() {
+        // Emails 1-4 were deleted on the server; UIDs keep their numbers
+        let uids: Vec<u32> = (5..=200).collect();
+        let (new, older) = plan_sync(&uids, Some(190), Some(100));
+        assert_eq!(new, (191..=200).collect::<Vec<_>>());
+        assert_eq!(older, (50..=99).collect::<Vec<_>>());
+
+        let (new, older) = plan_sync(&uids, Some(200), Some(5));
+        assert!(new.is_empty() && older.is_empty());
+    }
+
+    #[test]
+    fn date_limit_uses_imap_date_format() {
+        assert_eq!(imap_since("2024-01-05").as_deref(), Some("SINCE 5-Jan-2024"));
+        assert_eq!(imap_since("2024-13-05"), None);
+        assert_eq!(imap_since("nonsense"), None);
+    }
 }

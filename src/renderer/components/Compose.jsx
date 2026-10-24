@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { api } from '../api';
 
 function Compose({ replyTo, onClose, onSent }) {
   const [to, setTo] = useState('');
@@ -25,8 +26,8 @@ function Compose({ replyTo, onClose, onSent }) {
     setError('');
 
     try {
-      if (window.electronAPI) {
-        const result = await window.electronAPI.sendEmail({
+      if (api) {
+        const result = await api.sendEmail({
           to: to.trim(),
           subject: subject.trim(),
           text: text.trim(),

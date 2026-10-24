@@ -35,7 +35,6 @@ class ErrorBoundary extends React.Component {
 
 console.log('React app starting...');
 console.log('Root element:', document.getElementById('root'));
-console.log('window.electronAPI:', window.electronAPI);
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -52,5 +51,3 @@ if (!rootElement) {
   );
   console.log('React app rendered');
 }
-
-

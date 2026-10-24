@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { api } from '../api';
 
 function Settings({ onClose }) {
   const [email, setEmail] = useState('');
@@ -16,8 +17,8 @@ function Settings({ onClose }) {
   }, []);
 
   const loadSettings = async () => {
-    if (window.electronAPI) {
-      const settings = await window.electronAPI.getSettings();
+    if (api) {
+      const settings = await api.getSettings();
       if (settings.email) {
         setEmail(settings.email);
       }
@@ -38,8 +39,8 @@ function Settings({ onClose }) {
     setSuccess('');
 
     try {
-      if (window.electronAPI) {
-        const result = await window.electronAPI.testConnection({
+      if (api) {
+        const result = await api.testConnection({
           email: email.trim(),
           password: password.trim(),
         });
@@ -68,7 +69,7 @@ function Settings({ onClose }) {
     setSuccess('');
 
     try {
-      if (window.electronAPI) {
+      if (api) {
         const settingsToSave = {
           email: email.trim(),
           password: password.trim(),
@@ -76,7 +77,7 @@ function Settings({ onClose }) {
         if (syncFromDate) {
           settingsToSave.sync_from_date = syncFromDate;
         }
-        await window.electronAPI.saveSettings(settingsToSave);
+        await api.saveSettings(settingsToSave);
         setSuccess('Nastavení uloženo!');
         setTimeout(() => {
           onClose();
@@ -188,8 +189,8 @@ function Settings({ onClose }) {
                   setError('');
                   setSuccess('');
                   try {
-                    if (window.electronAPI?.reprocessEmails) {
-                      const result = await window.electronAPI.reprocessEmails();
+                    if (api?.reprocessEmails) {
+                      const result = await api.reprocessEmails();
                       if (result.success) {
                         setSuccess(`Přeparsováno ${result.processed} emailů`);
                       } else {
@@ -220,8 +221,8 @@ function Settings({ onClose }) {
                   setError('');
                   setSuccess('');
                   try {
-                    if (window.electronAPI?.clearEmails) {
-                      const result = await window.electronAPI.clearEmails();
+                    if (api?.clearEmails) {
+                      const result = await api.clearEmails();
                       if (result.success) {
                         setSuccess('Emaily smazány. Synchronizace začne znovu.');
                       } else {

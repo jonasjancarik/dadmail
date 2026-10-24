@@ -4,6 +4,7 @@ import EmailView from './components/EmailView';
 import Compose from './components/Compose';
 import Settings from './components/Settings';
 import SearchBar from './components/SearchBar';
+import { api } from './api';
 
 function App() {
   const [emails, setEmails] = useState([]);
@@ -56,14 +57,8 @@ function App() {
     const unsubscribers = [];
 
     const init = async () => {
-      let retries = 0;
-      while (!window.electronAPI && retries < 10) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        retries++;
-      }
-      
-      if (!window.electronAPI) {
-        console.error('electronAPI not available');
+      if (!api) {
+        console.error('No Electron or Tauri backend available');
         setLoading(false);
         return;
       }
@@ -72,7 +67,7 @@ function App() {
       await loadEmails();
       if (cancelled) return;
 
-      unsubscribers.push(window.electronAPI.onEmailsUpdated((count) => {
+      unsubscribers.push(api.onEmailsUpdated((count) => {
         loadEmails();
         if (count > 0) {
           setSyncStatus({ status: 'success', message: `+${count} nových` });
@@ -82,8 +77,8 @@ function App() {
         }
       }));
 
-      if (window.electronAPI.onSyncStatus) {
-        unsubscribers.push(window.electronAPI.onSyncStatus((status) => {
+      if (api.onSyncStatus) {
+        unsubscribers.push(api.onSyncStatus((status) => {
           setSyncStatus(status);
         }));
       }
@@ -106,8 +101,8 @@ function App() {
   }, [searchQuery]);
 
   const loadSettings = async () => {
-    if (window.electronAPI) {
-      const loadedSettings = await window.electronAPI.getSettings();
+    if (api) {
+      const loadedSettings = await api.getSettings();
       setSettings(loadedSettings);
       if (!loadedSettings.email || !loadedSettings.password) {
         setShowSettings(true);
@@ -116,11 +111,11 @@ function App() {
   };
 
   const loadEmails = async () => {
-    if (window.electronAPI) {
+    if (api) {
       setLoading(true);
       try {
         // Read the query from a ref so sync-triggered reloads keep the current search
-        const loadedEmails = await window.electronAPI.getEmails(searchQueryRef.current);
+        const loadedEmails = await api.getEmails(searchQueryRef.current);
         setEmails(loadedEmails);
       } catch (error) {
         console.error('Error loading emails:', error);
@@ -131,8 +126,8 @@ function App() {
   };
 
   const handleEmailClick = async (emailId) => {
-    if (window.electronAPI) {
-      const email = await window.electronAPI.getEmail(emailId);
+    if (api) {
+      const email = await api.getEmail(emailId);
       setSelectedEmail(email);
       // Opening marks the email as read; update the list locally instead of reloading it
       setEmails(prev => prev.map(e => (e.id === emailId && !e.is_read ? { ...e, is_read: 1 } : e)));
@@ -156,14 +151,14 @@ function App() {
   };
 
   const handleDelete = async () => {
-    if (selectedEmail && window.electronAPI) {
-      await window.electronAPI.deleteEmail(selectedEmail.id);
+    if (selectedEmail && api) {
+      await api.deleteEmail(selectedEmail.id);
       setSelectedEmail(null);
       loadEmails();
     }
   };
 
-  if (!window.electronAPI && loading) {
+  if (!api && loading) {
     return (
       <div className="h-screen flex items-center justify-center bg-gray-100">
         <div className="text-gray-500">Načítání...</div>

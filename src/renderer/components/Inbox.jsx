@@ -15,7 +15,7 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading, searchQuery }) {
     from: 160,
     subject: 220,
     preview: null, // null = flex
-    date: 150,
+    date: 165,
   });
   
   const [scrollTop, setScrollTop] = useState(0);

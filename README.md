@@ -16,7 +16,10 @@ npm run dev
 
 ## Sestavení
 
+Sestavení vyžaduje Node 22 (verze je v `.nvmrc`). S Node 26 se `npm run build` zastaví u kroku „Finalizing package“ bez chybové hlášky a nevytvoří složku `out/`.
+
 ```bash
+nvm use
 npm run build
 ```
 

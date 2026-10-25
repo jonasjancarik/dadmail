@@ -12,7 +12,8 @@ use tauri::{AppHandle, Emitter};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
-use crate::db::{get_setting, get_settings, set_setting, FOLDERS};
+use crate::db::{get_setting, get_settings, set_setting};
+use crate::folders::{self, FolderInfo};
 use crate::parse::parse_raw_email;
 use crate::{errors, secrets};
 
@@ -217,13 +218,32 @@ async fn map_missing_uids(
     Ok(())
 }
 
+// All folders on the server, with roles and Czech names
+async fn list_folders(session: &mut ImapSession) -> Result<Vec<FolderInfo>, String> {
+    let names: Vec<_> = session
+        .list(Some(""), Some("*"))
+        .await
+        .map_err(|e| e.to_string())?
+        .try_collect()
+        .await
+        .map_err(|e| e.to_string())?;
+    let entries: Vec<(String, Vec<NameAttribute<'static>>, Option<String>)> = names
+        .iter()
+        .map(|name| {
+            let attributes = name.attributes().iter().map(|a| a.clone().into_owned()).collect();
+            (name.name().to_string(), attributes, name.delimiter().map(str::to_string))
+        })
+        .collect();
+    Ok(folders::classify(&entries))
+}
+
 // Send changes made in DadMail for emails that are in this folder on the server:
 // read/unread, then moves (deleting moves to the trash, restoring moves back)
 async fn push_pending_actions(
     session: &mut ImapSession,
     db: &Db,
     folder: &str,
-    server_names: &HashMap<&str, String>,
+    server_names: &HashMap<String, String>,
 ) -> Result<(), String> {
     for (action, command) in [("read", "+FLAGS.SILENT (\\Seen)"), ("unread", "-FLAGS.SILENT (\\Seen)")] {
         let uids = {
@@ -254,7 +274,7 @@ async fn push_pending_actions(
         }
     }
 
-    for target in FOLDERS.iter().filter(|f| **f != folder) {
+    for target in server_names.keys().filter(|f| f.as_str() != folder) {
         let uids = {
             let conn = db.lock().unwrap();
             conn.prepare("SELECT uid FROM emails WHERE server_folder = ? AND folder = ? AND uid IS NOT NULL")
@@ -400,16 +420,18 @@ async fn sync_emails(app: &AppHandle, db: &Db) -> Result<SyncOutcome, String> {
     };
 
     let mut session = connect(email, &password).await?;
-    let server_names: HashMap<&str, String> = HashMap::from([
-        ("inbox", "INBOX".to_string()),
-        ("sent", find_folder(&mut session, NameAttribute::Sent, "sent").await),
-        ("trash", find_folder(&mut session, NameAttribute::Trash, "trash").await),
-    ]);
+    let folder_list = list_folders(&mut session).await?;
+    let removed = crate::db::save_folders(&db.lock().unwrap(), &folder_list).map_err(|e| e.to_string())?;
+    if removed > 0 {
+        log::info!("Removed {removed} emails from folders that no longer exist on the server");
+    }
+    let server_names: HashMap<String, String> =
+        folder_list.iter().map(|f| (f.id.clone(), f.server_name.clone())).collect();
     let date_limit = settings.get("sync_from_date").and_then(|d| imap_since(d));
 
     let mut arrived = Vec::new();
-    let (mut downloaded, mut remaining, mut changes) = (0, 0, 0);
-    for folder in FOLDERS {
+    let (mut downloaded, mut remaining, mut changes) = (removed, 0, 0);
+    for folder in folder_list.iter().map(|f| f.id.as_str()) {
         let result = sync_folder(app, db, &mut session, folder, &server_names, date_limit.as_deref()).await?;
         downloaded += result.arrived.len() + result.older;
         remaining += result.remaining;
@@ -443,7 +465,7 @@ async fn sync_folder(
     db: &Db,
     session: &mut ImapSession,
     folder: &str,
-    server_names: &HashMap<&str, String>,
+    server_names: &HashMap<String, String>,
     date_limit: Option<&str>,
 ) -> Result<FolderResult, String> {
     let key = |base: &str| state_key(folder, base);
@@ -620,11 +642,11 @@ async fn fetch_uids(
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.as_secs() as i64)
                     });
-                    // Sent emails are the user's own: never unread
+                    // Sent emails and drafts are the user's own: never unread
                     let added = insert
                         .execute(params![
                             folder, message_id, p.from_addr, p.from_name, p.to_addr, p.subject,
-                            p.body_html, p.body_text, p.preview, date, p.in_reply_to, uid, folder == "sent"
+                            p.body_html, p.body_text, p.preview, date, p.in_reply_to, uid, folder == "sent" || folder == "drafts"
                         ])
                         .map_err(|e| e.to_string())?;
                     if added > 0 {

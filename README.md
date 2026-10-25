@@ -66,7 +66,8 @@ v `telemetry/README.md`.
 1. Při prvním spuštění zadejte vaše Seznam.cz přihlašovací údaje. Heslo se uloží do
    systémového úložiště hesel (Správce přihlašovacích údajů ve Windows, Klíčenka na macOS),
    ne do databáze aplikace.
-2. Aplikace automaticky synchronizuje emaily každých 30 sekund. Přečtení a smazání emailu
+2. Aplikace automaticky synchronizuje emaily každých 30 sekund, ve všech složkách na serveru
+   (pojmenovaných jako v Thunderbirdu, Hromadné = složka `newsletters` na Seznamu). Přečtení a smazání emailu
    se projeví i na serveru: smazaný email se přesune do koše, takže ho lze obnovit
    ve webové poště Seznamu.
 3. Klikněte na email pro zobrazení. Odkazy se otevírají v prohlížeči a obrázky z internetu

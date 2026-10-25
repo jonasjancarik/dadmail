@@ -9,12 +9,16 @@ import { initZoom } from './zoom';
 import { setShortcutHandler, handleShortcutKey } from './shortcuts';
 import Icon from './components/Icon';
 
-// Folder names as Thunderbird shows them in Czech
-const FOLDERS = [
-  { id: 'inbox', label: 'Doručená pošta', icon: 'mail' },
-  { id: 'sent', label: 'Odeslaná pošta', icon: 'send' },
-  { id: 'trash', label: 'Koš', icon: 'trash' },
+// Until the server's list arrives
+const DEFAULT_FOLDERS = [
+  { id: 'inbox', label: 'Doručená pošta', role: 'inbox', depth: 0, unread: 0 },
+  { id: 'sent', label: 'Odeslaná pošta', role: 'sent', depth: 0, unread: 0 },
+  { id: 'trash', label: 'Koš', role: 'trash', depth: 0, unread: 0 },
 ];
+
+const ROLE_ICONS = { inbox: 'mail', drafts: 'compose', sent: 'send', archive: 'archive', spam: 'warning', trash: 'trash' };
+// Folders of his own writing: counting unread there is noise
+const NO_UNREAD_COUNT = new Set(['sent', 'drafts']);
 
 // How long "Vrátit" stays available after deleting
 const UNDO_SECONDS = 8;
@@ -41,24 +45,28 @@ function SyncStatus({ status }) {
   );
 }
 
-function FolderList({ folder, counts, onSelect }) {
+function FolderList({ folder, folders, onSelect }) {
   return (
-    <nav className="w-60 shrink-0 bg-ink-50 border-r border-ink-200 p-2 space-y-0.5" aria-label="Složky">
-      {FOLDERS.map((f) => {
+    <nav className="w-60 shrink-0 bg-ink-50 border-r border-ink-200 p-2 space-y-0.5 overflow-y-auto" aria-label="Složky">
+      {folders.map((f) => {
         const active = f.id === folder;
-        const unread = counts[f.id] || 0;
+        const unread = NO_UNREAD_COUNT.has(f.role) ? 0 : f.unread;
         return (
           <button
             key={f.id}
             onClick={() => onSelect(f.id)}
             aria-current={active ? 'page' : undefined}
-            className={`w-full h-10 px-3 flex items-center gap-3 rounded-lg text-left transition-colors ${
+            style={{ paddingLeft: `${12 + f.depth * 16}px` }}
+            className={`w-full h-10 pr-3 flex items-center gap-3 rounded-lg text-left transition-colors ${
               active ? 'bg-accent-100 text-accent-900 font-semibold' : 'text-ink-700 hover:bg-ink-100'
             }`}
           >
-            <Icon name={f.icon} className={`w-[18px] h-[18px] ${active ? 'text-accent-700' : 'text-ink-500'}`} />
+            <Icon
+              name={ROLE_ICONS[f.role] || 'folder'}
+              className={`w-[18px] h-[18px] ${active ? 'text-accent-700' : 'text-ink-500'}`}
+            />
             <span className="flex-1 truncate">{f.label}</span>
-            {unread > 0 && f.id !== 'sent' && (
+            {unread > 0 && (
               <span className="min-w-6 px-1.5 rounded-md bg-accent-700 text-white text-xs font-semibold text-center tabular-nums">
                 {unread}
               </span>
@@ -74,7 +82,7 @@ function App() {
   const [folder, setFolder] = useState('inbox');
   const folderRef = useRef('inbox');
   const [emails, setEmails] = useState([]);
-  const [counts, setCounts] = useState({});
+  const [folders, setFolders] = useState(DEFAULT_FOLDERS);
   const [selectedEmail, setSelectedEmail] = useState(null);
   // What the compose window was opened for: { mode: 'new' | 'reply' | 'forward', email?, to? }
   const [compose, setCompose] = useState(null);
@@ -189,12 +197,14 @@ function App() {
     setLoading(true);
     try {
       // Read folder and query from refs so sync-triggered reloads keep what is shown
-      const [loadedEmails, loadedCounts] = await Promise.all([
+      const [loadedEmails, loadedFolders] = await Promise.all([
         api.getEmails(folderRef.current, searchQueryRef.current),
-        api.folderCounts(),
+        api.getFolders(),
       ]);
       setEmails(loadedEmails);
-      setCounts(loadedCounts);
+      if (loadedFolders.length > 0) setFolders(loadedFolders);
+      // A folder that disappeared from the server: back to the inbox
+      if (loadedFolders.length > 0 && !loadedFolders.some((f) => f.id === folderRef.current)) openFolder('inbox');
     } catch (error) {
       console.error('Error loading emails:', error);
     } finally {
@@ -215,7 +225,9 @@ function App() {
     setSelectedEmail(email);
     // Opening marks the email as read; update the list locally instead of reloading it
     setEmails(prev => prev.map(e => (e.id === emailId && !e.is_read ? { ...e, is_read: 1 } : e)));
-    setCounts(prev => (email && !email.is_read ? { ...prev, [folderRef.current]: Math.max(0, (prev[folderRef.current] || 1) - 1) } : prev));
+    if (email && !email.is_read) {
+      setFolders(prev => prev.map(f => (f.id === folderRef.current ? { ...f, unread: Math.max(0, f.unread - 1) } : f)));
+    }
   };
 
   // Check Seznam for new mail now, like Thunderbird's "Načíst zprávy"
@@ -322,6 +334,7 @@ function App() {
   }
 
   const syncing = syncStatus.status === 'syncing';
+  const currentRole = folders.find((f) => f.id === folder)?.role ?? null;
 
   return (
     <div className="h-screen flex flex-col bg-ink-100">
@@ -378,7 +391,7 @@ function App() {
       )}
 
       <div className="flex-1 flex overflow-hidden">
-        <FolderList folder={folder} counts={counts} onSelect={openFolder} />
+        <FolderList folder={folder} folders={folders} onSelect={openFolder} />
 
         {/* Main Content - Vertical Split */}
         <main ref={containerRef} className="flex-1 min-w-0 flex flex-col overflow-hidden">
@@ -386,7 +399,7 @@ function App() {
           <div style={{ height: paneHeight }} className="min-h-[100px] overflow-hidden flex-shrink-0 bg-white">
             <Inbox
               emails={emails}
-              folder={folder}
+              folderRole={currentRole}
               selectedEmail={selectedEmail}
               onEmailClick={handleEmailClick}
               onSortedChange={(ids) => { sortedIds.current = ids; }}
@@ -414,6 +427,7 @@ function App() {
                 onForward={() => startCompose('forward', selectedEmail)}
                 onDelete={handleDelete}
                 onRestore={handleRestore}
+                folderRole={currentRole}
                 onToggleRead={toggleRead}
                 onWriteTo={(address) => startCompose('new', null, address)}
               />

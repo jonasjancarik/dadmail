@@ -26,7 +26,7 @@ const tauriApi = {
   deleteEmail: (id) => withStatus('delete_email', { id }),
   restoreEmail: (id) => withStatus('restore_email', { id }),
   markUnread: (id) => withStatus('mark_unread', { id }),
-  folderCounts: () => invoke('folder_counts'),
+  getFolders: () => invoke('get_folders'),
   getContacts: () => invoke('get_contacts').catch(() => []),
   getDraft: async () => {
     const draft = await invoke('get_draft').catch(() => null);

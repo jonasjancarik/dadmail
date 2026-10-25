@@ -5,8 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::parse::make_preview;
 
-// The folders DadMail shows. The server's own names are looked up by role when syncing.
-pub const FOLDERS: [&str; 3] = ["inbox", "sent", "trash"];
+use crate::folders::FolderInfo;
 
 const EMAILS_TABLE: &str = "
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,6 +50,20 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         CREATE TRIGGER IF NOT EXISTS email_raw_delete AFTER DELETE ON emails BEGIN
           DELETE FROM email_raw WHERE email_id = old.id;
         END;
+        -- The server's folders, refreshed on every sync (see folders.rs)
+        CREATE TABLE IF NOT EXISTS folders (
+          id TEXT PRIMARY KEY,
+          server_name TEXT NOT NULL,
+          role TEXT,
+          label TEXT NOT NULL,
+          depth INTEGER NOT NULL DEFAULT 0,
+          position INTEGER NOT NULL
+        );
+        -- Until the first sync, the folders every Seznam account has
+        INSERT OR IGNORE INTO folders (id, server_name, role, label, position) VALUES
+          ('inbox', 'INBOX', 'inbox', 'Doručená pošta', 0),
+          ('sent', 'sent', 'sent', 'Odeslaná pošta', 1),
+          ('trash', 'trash', 'trash', 'Koš', 2);
         CREATE TABLE IF NOT EXISTS settings (
           key TEXT PRIMARY KEY,
           value TEXT NOT NULL
@@ -202,6 +215,27 @@ fn fill_missing_previews(db: &Connection) -> rusqlite::Result<()> {
     tx.commit()?;
     log::info!("Filled previews for {} emails", rows.len());
     Ok(())
+}
+
+// Replace the folder list with what the server has now. Emails in folders that are gone
+// (deleted or renamed on the server) are removed; a renamed folder downloads them again.
+pub fn save_folders(db: &Connection, folders: &[FolderInfo]) -> rusqlite::Result<usize> {
+    let tx = db.unchecked_transaction()?;
+    tx.execute("DELETE FROM folders", [])?;
+    {
+        let mut insert = tx.prepare(
+            "INSERT INTO folders (id, server_name, role, label, depth, position) VALUES (?, ?, ?, ?, ?, ?)",
+        )?;
+        for f in folders {
+            insert.execute(params![f.id, f.server_name, f.role, f.label, f.depth as i64, f.position])?;
+        }
+    }
+    let removed = tx.execute(
+        "DELETE FROM emails WHERE folder NOT IN (SELECT id FROM folders) OR server_folder NOT IN (SELECT id FROM folders)",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(removed)
 }
 
 pub fn get_setting(db: &Connection, key: &str) -> rusqlite::Result<Option<String>> {

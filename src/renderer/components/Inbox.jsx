@@ -6,7 +6,7 @@ import Icon from './Icon';
 const ROW_HEIGHT = 38;
 const OVERSCAN = 10;
 
-function Inbox({ emails, folder, selectedEmail, onEmailClick, onSortedChange, loading, searchQuery }) {
+function Inbox({ emails, folderRole, selectedEmail, onEmailClick, onSortedChange, loading, searchQuery }) {
   const [sortField, setSortField] = useState('date');
   const [sortDirection, setSortDirection] = useState('desc');
   
@@ -77,6 +77,9 @@ function Inbox({ emails, folder, selectedEmail, onEmailClick, onSortedChange, lo
     };
   }, []);
 
+  // In sent mail and drafts the interesting person is the recipient
+  const sent = folderRole === 'sent' || folderRole === 'drafts';
+
   const sortedEmails = useMemo(() => {
     if (!emails || emails.length === 0) return [];
     
@@ -85,8 +88,8 @@ function Inbox({ emails, folder, selectedEmail, onEmailClick, onSortedChange, lo
       
       switch (sortField) {
         case 'from':
-          aVal = (folder === 'sent' ? a.to_addr : a.from_name || a.from_addr || '').toLowerCase();
-          bVal = (folder === 'sent' ? b.to_addr : b.from_name || b.from_addr || '').toLowerCase();
+          aVal = (sent ? a.to_addr : a.from_name || a.from_addr || '').toLowerCase();
+          bVal = (sent ? b.to_addr : b.from_name || b.from_addr || '').toLowerCase();
           break;
         case 'subject':
           aVal = (a.subject || '').toLowerCase();
@@ -103,10 +106,8 @@ function Inbox({ emails, folder, selectedEmail, onEmailClick, onSortedChange, lo
       if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [emails, folder, sortField, sortDirection]);
+  }, [emails, folderRole, sortField, sortDirection]);
 
-  // In the sent folder the interesting person is the recipient
-  const sent = folder === 'sent';
   const person = (email) => (sent ? email.to_addr : email.from_name || email.from_addr);
 
   useEffect(() => {
@@ -169,15 +170,19 @@ function Inbox({ emails, folder, selectedEmail, onEmailClick, onSortedChange, lo
   if (emails.length === 0) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-2 text-center px-6">
-        <Icon name={searchQuery ? 'search' : folder === 'trash' ? 'trash' : 'mail'} className="w-9 h-9 text-ink-300" />
+        <Icon name={searchQuery ? 'search' : folderRole === 'trash' ? 'trash' : 'mail'} className="w-9 h-9 text-ink-300" />
         {searchQuery ? (
           <p className="text-ink-600">Nic jsme nenašli pro „{searchQuery}“. Zkuste jiné slovo.</p>
-        ) : folder === 'trash' ? (
+        ) : folderRole === 'trash' ? (
           <p className="text-ink-600">Koš je prázdný.</p>
-        ) : folder === 'sent' ? (
+        ) : folderRole === 'spam' ? (
+          <p className="text-ink-600">Žádná nevyžádaná pošta.</p>
+        ) : folderRole === 'sent' ? (
           <p className="text-ink-600">Zatím tu nejsou žádné odeslané emaily.</p>
-        ) : (
+        ) : folderRole === 'inbox' ? (
           <p className="text-ink-600">Zatím tu nejsou žádné emaily. Stahují se ze Seznamu, chvíli to může trvat.</p>
+        ) : (
+          <p className="text-ink-600">V této složce nejsou žádné emaily.</p>
         )}
       </div>
     );

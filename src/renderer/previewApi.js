@@ -43,6 +43,8 @@ export function createPreviewApi() {
   emails.push(
     { id: 101, folder: 'sent', from_name: 'Jiří Novák', from_addr: 'jiri@seznam.cz', to_addr: 'petr.novak@email.cz', subject: 'Re: Fotky z víkendu', preview: 'Děkuji, moc hezké. Babička má radost.', body_text: 'Děkuji, moc hezké. Babička má radost.\n\nTáta', body_html: '', date: now - 3 * hour, is_read: 1, attachments: [] },
     { id: 102, folder: 'sent', from_name: 'Jiří Novák', from_addr: 'jiri@seznam.cz', to_addr: 'tomas.kucera@centrum.cz', subject: 'Re: Šachy ve čtvrtek?', preview: 'Platí, budu tam v šest.', body_text: 'Platí, budu tam v šest.', body_html: '', date: now - 4 * day, is_read: 1, attachments: [] },
+    { id: 104, folder: 'spam', from_name: 'Výhra', from_addr: 'vyhra@loterie-zdarma.biz', to_addr: 'jiri@seznam.cz', subject: 'Vyhráli jste iPhone', preview: 'Klikněte a vyzvedněte si výhru.', body_text: 'Klikněte a vyzvedněte si výhru.', body_html: '', date: now - 5 * hour, is_read: 0, attachments: [] },
+    { id: 105, folder: 'folder:newsletters', from_name: 'Sousedská zahrada', from_addr: 'novinky@sousedska-zahrada.cz', to_addr: 'jiri@seznam.cz', subject: 'Listopadový zpravodaj', preview: 'Co dělat na zahradě v listopadu.', body_text: 'Co dělat na zahradě v listopadu.', body_html: '', date: now - 1 * day, is_read: 0, attachments: [] },
     { id: 103, folder: 'trash', from_name: 'Výprodej Plus', from_addr: 'akce@vyprodej-plus.cz', to_addr: 'jiri@seznam.cz', subject: 'Sleva 40 % jen dnes', preview: 'Nenechte si ujít naši největší akci roku.', body_text: 'Nenechte si ujít naši největší akci roku.', body_html: '', date: now - 2 * day, is_read: 1, attachments: [] },
   );
   let draft = null;
@@ -76,8 +78,20 @@ export function createPreviewApi() {
       emails.find((e) => e.id === id).is_read = 0;
       return ok();
     },
-    folderCounts: async () =>
-      Object.fromEntries(['inbox', 'sent', 'trash'].map((f) => [f, emails.filter((e) => e.folder === f && !e.is_read).length])),
+    getFolders: async () =>
+      [
+        ['inbox', 'Doručená pošta', 'inbox', 0],
+        ['drafts', 'Koncepty', 'drafts', 0],
+        ['sent', 'Odeslaná pošta', 'sent', 0],
+        ['archive', 'Archiv', 'archive', 0],
+        ['spam', 'Nevyžádaná pošta', 'spam', 0],
+        ['trash', 'Koš', 'trash', 0],
+        ['folder:newsletters', 'Hromadné', null, 0],
+        ['folder:Rodina', 'Rodina', null, 0],
+        ['folder:Rodina|Vnoučata', 'Vnoučata', null, 1],
+      ].map(([id, label, role, depth]) => ({
+        id, label, role, depth, unread: emails.filter((e) => e.folder === id && !e.is_read).length,
+      })),
     getContacts: async () => [
       { name: 'Petr Novák', address: 'petr.novak@email.cz' },
       { name: 'Jana Dvořáková', address: 'jana.dvorakova@seznam.cz' },

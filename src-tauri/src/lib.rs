@@ -1,5 +1,6 @@
 mod db;
 mod errors;
+mod folders;
 mod imap;
 mod parse;
 mod secrets;
@@ -282,20 +283,31 @@ async fn mark_unread(app: AppHandle, state: State<'_, AppState>, id: i64) -> Com
     Ok(())
 }
 
-// Unread emails per folder, for the folder list
+#[derive(Serialize)]
+struct Folder {
+    id: String,
+    label: String,
+    role: Option<String>,
+    depth: i64,
+    unread: i64,
+}
+
+// The folder list for the left pane, with unread counts
 #[tauri::command]
-async fn folder_counts(state: State<'_, AppState>) -> CommandResult<HashMap<String, i64>> {
+async fn get_folders(state: State<'_, AppState>) -> CommandResult<Vec<Folder>> {
     let conn = state.db.lock().unwrap();
-    let mut counts: HashMap<String, i64> = db::FOLDERS.iter().map(|f| (f.to_string(), 0)).collect();
-    let rows = conn
-        .prepare("SELECT folder, count(*) FROM emails WHERE is_read = 0 GROUP BY folder")
-        .and_then(|mut stmt| {
-            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .map_err(to_string_error)?;
-    counts.extend(rows);
-    Ok(counts)
+    conn.prepare(
+        "SELECT f.id, f.label, f.role, f.depth,
+           (SELECT count(*) FROM emails e WHERE e.folder = f.id AND e.is_read = 0)
+         FROM folders f ORDER BY f.position",
+    )
+    .and_then(|mut stmt| {
+        stmt.query_map([], |r| {
+            Ok(Folder { id: r.get(0)?, label: r.get(1)?, role: r.get(2)?, depth: r.get(3)?, unread: r.get(4)? })
+        })?
+        .collect::<Result<Vec<_>, _>>()
+    })
+    .map_err(to_string_error)
 }
 
 #[derive(Serialize)]
@@ -743,7 +755,7 @@ pub fn run() {
             delete_email,
             restore_email,
             mark_unread,
-            folder_counts,
+            get_folders,
             get_contacts,
             get_draft,
             save_draft,

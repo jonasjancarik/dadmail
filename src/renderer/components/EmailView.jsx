@@ -109,7 +109,7 @@ const escapeHtml = (text) =>
   String(text).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
 const EmailView = forwardRef(function EmailView(
-  { email, onReply, onForward, onDelete, onRestore, onToggleRead, onWriteTo },
+  { email, folderRole, onReply, onForward, onDelete, onRestore, onToggleRead, onWriteTo },
   ref
 ) {
   const iframeRef = useRef(null);
@@ -223,12 +223,13 @@ const EmailView = forwardRef(function EmailView(
             {email.is_read ? 'Označit jako nepřečtené' : 'Označit jako přečtené'}
           </button>
           <div className="flex-1" />
-          {email.folder === 'trash' ? (
+          {folderRole === 'trash' || folderRole === 'spam' ? (
             <button onClick={onRestore} className="btn-secondary">
               <Icon name="restore" className="w-[18px] h-[18px]" />
-              Obnovit do doručené pošty
+              {folderRole === 'spam' ? 'Není to spam' : 'Obnovit do doručené pošty'}
             </button>
-          ) : (
+          ) : null}
+          {folderRole === 'trash' ? null : (
             <button onClick={onDelete} className="btn-danger" title="Smazat (Delete)">
               <Icon name="trash" className="w-[18px] h-[18px]" />
               Smazat

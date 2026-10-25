@@ -52,9 +52,13 @@ pub async fn send_email(email: OutgoingEmail) -> Result<SentEmail, String> {
         message_id: message.headers().get_raw("Message-ID").unwrap_or_default().to_string(),
         raw: message.formatted(),
     };
-    mailer
-        .send(message)
-        .await
-        .map_err(|e| crate::errors::describe(&e.to_string()))?;
+    mailer.send(message).await.map_err(|e| {
+        let raw = e.to_string();
+        let message = crate::errors::describe(&raw);
+        if message != crate::errors::NO_CONNECTION {
+            crate::telemetry::report("send", &raw);
+        }
+        message
+    })?;
     Ok(sent)
 }

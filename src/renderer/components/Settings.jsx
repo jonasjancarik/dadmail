@@ -15,6 +15,7 @@ function Settings({ onClose }) {
   const [clearing, setClearing] = useState(false);
   const [reprocessing, setReprocessing] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [reportErrors, setReportErrors] = useState(true);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
 
@@ -30,6 +31,7 @@ function Settings({ onClose }) {
         setSavedPasswordFor(settings.email);
       }
     }
+    setReportErrors(settings.telemetry !== 'off');
     if (settings.sync_from_date) {
       setSyncFromDate(settings.sync_from_date);
     }
@@ -253,6 +255,25 @@ function Settings({ onClose }) {
             <span className="text-ink-400 transition-transform group-open:rotate-90">›</span>
           </summary>
           <div className="px-6 pb-6 space-y-5">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={reportErrors}
+                onChange={async (e) => {
+                  setReportErrors(e.target.checked);
+                  await api.saveSettings({ telemetry: e.target.checked ? 'on' : 'off' });
+                }}
+                className="mt-1 w-4 h-4 accent-accent-700"
+              />
+              <span>
+                <span className="font-medium text-ink-800">Posílat hlášení o chybách</span>
+                <span className="field-hint block mt-0.5">
+                  Když se něco pokazí, DadMail pošle Jonášovi krátkou zprávu o tom, co selhalo. Nikdy v ní nejsou
+                  emaily, jejich obsah ani adresy.
+                </span>
+              </span>
+            </label>
+
             <div>
               <button onClick={reprocess} className="btn-secondary w-full" disabled={busy}>
                 {reprocessing ? 'Obnovuji…' : 'Obnovit zobrazení emailů'}

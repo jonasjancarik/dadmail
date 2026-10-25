@@ -55,6 +55,12 @@ Workflow potřebuje secret `TAURI_SIGNING_PRIVATE_KEY` s obsahem souboru s klí�
 Data aplikace jsou ve složce `com.github.jonasjancarik.dadmail`
 (na macOS v `~/Library/Application Support`, na Windows v `%APPDATA%`).
 
+## Hlášení o chybách
+
+Když se něco pokazí, aplikace pošle krátké hlášení (bez obsahu emailů a adres) do
+Cloudflare Workeru ve složce `telemetry/`. Podrobnosti a adresa stránky s hlášeními jsou
+v `telemetry/README.md`.
+
 ## Použití
 
 1. Při prvním spuštění zadejte vaše Seznam.cz přihlašovací údaje. Heslo se uloží do

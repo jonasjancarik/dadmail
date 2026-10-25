@@ -45,6 +45,7 @@ const tauriApi = {
   openLink: (url) => withStatus('open_link', { url }),
   setZoom: (zoom) => invoke('set_zoom', { zoom }),
   syncNow: () => invoke('sync_now'),
+  reportError: (message) => invoke('report_ui_error', { message: String(message) }).catch(() => {}),
   checkForUpdate: () => invoke('check_for_update').catch(() => null),
   installUpdate: () => withStatus('install_update'),
   openAttachment: (emailId, index) => withStatus('open_attachment', { emailId, index }),

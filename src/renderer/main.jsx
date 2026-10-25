@@ -2,8 +2,16 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';
 import './styles/globals.css';
+import { api } from './api';
 
-// Add error boundary
+// Error reports for Jonáš: the error and where it happened, nothing from the emails
+const describeError = (error) =>
+  [`${error?.name || 'Error'}: ${error?.message || error}`, ...(error?.stack || '').split('\n').slice(1, 6)].join('\n');
+
+window.addEventListener('error', (event) => api.reportError(describeError(event.error || event.message)));
+window.addEventListener('unhandledrejection', (event) => api.reportError(describeError(event.reason)));
+
+// If the window itself breaks, show a way out instead of a blank screen
 class ErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -16,15 +24,18 @@ class ErrorBoundary extends React.Component {
 
   componentDidCatch(error, errorInfo) {
     console.error('React Error:', error, errorInfo);
+    api.reportError(`${describeError(error)}\n${(errorInfo?.componentStack || '').trim().split('\n').slice(0, 4).join('\n')}`);
   }
 
   render() {
     if (this.state.hasError) {
       return (
-        <div style={{ padding: '20px', fontSize: '18px' }}>
-          <h1>Chyba při načítání aplikace</h1>
-          <p>{this.state.error?.toString()}</p>
-          <button onClick={() => window.location.reload()}>Obnovit stránku</button>
+        <div className="h-screen flex flex-col items-center justify-center gap-4 p-6 text-center bg-ink-100">
+          <h1 className="text-2xl font-semibold text-ink-900">Něco se pokazilo</h1>
+          <p className="text-ink-600 max-w-md">Okno DadMailu se nepodařilo zobrazit. Vaše emaily jsou v pořádku.</p>
+          <button onClick={() => window.location.reload()} className="btn-primary">
+            Zkusit znovu
+          </button>
         </div>
       );
     }

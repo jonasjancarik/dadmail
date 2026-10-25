@@ -110,6 +110,7 @@ export function createPreviewApi() {
     },
     checkForUpdate: async () => '0.2.0',
     syncNow: async () => {},
+    reportError: async (message) => console.warn('Error report (preview only, not sent):', message),
     installUpdate: () => ok(),
     openAttachment: () => ok(),
     saveAttachment: (emailId, index) => ok({ fileName: emails.find((e) => e.id === emailId).attachments[index].file_name }),

@@ -82,7 +82,12 @@ pub async fn run_sync_loop(app: AppHandle, db: Db, wake: Arc<Notify>) {
                 Duration::from_secs(27)
             }
             Err(error) => {
-                emit_status(&app, "error", &errors::describe(&error), None);
+                let message = errors::describe(&error);
+                // Being offline is normal and not worth a report
+                if message != errors::NO_CONNECTION {
+                    crate::telemetry::report("sync", &error);
+                }
+                emit_status(&app, "error", &message, None);
                 Duration::from_secs(10)
             }
         };

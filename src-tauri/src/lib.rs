@@ -4,6 +4,7 @@ mod imap;
 mod parse;
 mod secrets;
 mod smtp;
+mod telemetry;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -401,6 +402,9 @@ async fn save_settings(state: State<'_, AppState>, mut settings: HashMap<String,
     for (key, value) in &settings {
         db::set_setting(&conn, key, value).map_err(to_string_error)?;
     }
+    if settings.contains_key("telemetry") {
+        telemetry::configure(&conn);
+    }
     state.sync_now.notify_one();
     Ok(())
 }
@@ -660,11 +664,18 @@ async fn install_update(app: AppHandle) -> CommandResult<()> {
         .await
         .map_err(|e| errors::describe(&e.to_string()))?
         .ok_or("Žádná nová verze není k dispozici.")?;
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|e| errors::describe(&e.to_string()))?;
+    update.download_and_install(|_, _| {}, || {}).await.map_err(|e| {
+        telemetry::report("update", &e.to_string());
+        errors::describe(&e.to_string())
+    })?;
     app.restart();
+}
+
+// Errors in the window (JavaScript errors, crashes of the interface)
+#[tauri::command]
+async fn report_ui_error(message: String) -> CommandResult<()> {
+    telemetry::report("ui", &message);
+    Ok(())
 }
 
 // Earlier versions kept the password in the database; move it to the system password store
@@ -695,7 +706,10 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            telemetry::install_panic_hook(data_dir.clone());
             let conn = db::open(&data_dir.join("dadmail.db"))?;
+            telemetry::configure(&conn);
+            telemetry::send_crash_from_last_run(&data_dir);
             move_password_out_of_database(&conn);
             let db = Arc::new(Mutex::new(conn));
             log::info!("Database initialized at {}", data_dir.display());
@@ -745,6 +759,7 @@ pub fn run() {
             save_attachment,
             set_zoom,
             sync_now,
+            report_ui_error,
             check_for_update,
             install_update,
         ])

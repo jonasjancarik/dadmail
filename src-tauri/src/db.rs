@@ -5,33 +5,44 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::parse::make_preview;
 
-// Same schema as the Electron app (src/main/db.js), so a database can move between them
+// The folders DadMail shows. The server's own names are looked up by role when syncing.
+pub const FOLDERS: [&str; 3] = ["inbox", "sent", "trash"];
+
+const EMAILS_TABLE: &str = "
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  -- Where DadMail shows the email: inbox, sent or trash
+  folder TEXT NOT NULL DEFAULT 'inbox',
+  -- Where it is on the server. Differs from folder while a move made in DadMail waits to be sent.
+  server_folder TEXT NOT NULL DEFAULT 'inbox',
+  -- IMAP UID in server_folder; NULL until known (after a move the server assigns a new one)
+  uid INTEGER,
+  message_id TEXT NOT NULL,
+  from_addr TEXT NOT NULL,
+  from_name TEXT NOT NULL,
+  to_addr TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body_html TEXT,
+  body_text TEXT,
+  raw_content BLOB, -- no longer used: original emails are in email_raw
+  date INTEGER NOT NULL,
+  is_read INTEGER DEFAULT 0,
+  thread_id TEXT,
+  created_at INTEGER DEFAULT (strftime('%s', 'now')),
+  preview TEXT,
+  -- 'read' or 'unread': a change made in DadMail, not yet sent to the server
+  pending_action TEXT,
+  -- The same email can be in two folders (e.g. sent to yourself)
+  UNIQUE(folder, message_id)
+";
+
 pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     let db = Connection::open(path)?;
     db.pragma_update(None, "foreign_keys", "ON")?;
     db.pragma_update(None, "journal_mode", "WAL")?;
 
+    db.execute_batch(&format!("CREATE TABLE IF NOT EXISTS emails ({EMAILS_TABLE});"))?;
     db.execute_batch(
         "
-        CREATE TABLE IF NOT EXISTS emails (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          message_id TEXT UNIQUE NOT NULL,
-          from_addr TEXT NOT NULL,
-          from_name TEXT NOT NULL,
-          to_addr TEXT NOT NULL,
-          subject TEXT NOT NULL,
-          body_html TEXT,
-          body_text TEXT,
-          raw_content BLOB, -- no longer used: original emails are in email_raw
-          date INTEGER NOT NULL,
-          is_read INTEGER DEFAULT 0,
-          is_deleted INTEGER DEFAULT 0,
-          thread_id TEXT,
-          created_at INTEGER DEFAULT (strftime('%s', 'now')),
-          preview TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_date ON emails(date DESC);
-        CREATE INDEX IF NOT EXISTS idx_is_deleted ON emails(is_deleted);
         -- The original emails, kept apart so listing emails doesn't read through them
         CREATE TABLE IF NOT EXISTS email_raw (
           email_id INTEGER PRIMARY KEY,
@@ -47,9 +58,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
         ",
     )?;
 
-    // Columns added after the first version.
-    // uid: the email's IMAP UID in INBOX, so changes can be sent to the server.
-    // pending_action: 'read' or 'delete', made in DadMail but not yet sent to the server.
+    // Columns added to the Electron-era table, needed before it can be converted below
     for (column, definition) in [
         ("preview", "TEXT"),
         ("uid", "INTEGER"),
@@ -62,7 +71,13 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
             db.execute(&format!("ALTER TABLE emails ADD COLUMN {column} {definition}"), [])?;
         }
     }
-    db.execute("CREATE INDEX IF NOT EXISTS idx_uid ON emails(uid)", [])?;
+    add_folders(&db)?;
+    db.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_folder_date ON emails(folder, date DESC);
+        CREATE INDEX IF NOT EXISTS idx_server_uid ON emails(server_folder, uid);
+        ",
+    )?;
     move_raw_emails_out(&db)?;
     fill_missing_previews(&db)?;
 
@@ -104,6 +119,47 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
     db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
 
     Ok(db)
+}
+
+// Earlier versions only knew the inbox and kept Message-IDs unique across everything.
+// Rebuild the table once with folders, keeping every id (search index and email_raw use them).
+fn add_folders(db: &Connection) -> rusqlite::Result<()> {
+    let has_folder: bool = db
+        .prepare("SELECT 1 FROM pragma_table_info('emails') WHERE name = 'folder'")?
+        .exists([])?;
+    if has_folder {
+        return Ok(());
+    }
+    let tx = db.unchecked_transaction()?;
+    tx.execute_batch(&format!("CREATE TABLE emails_with_folders ({EMAILS_TABLE});"))?;
+    // Emails that were deleted earlier only hid locally; the trash folder will bring them back.
+    // A delete that had not reached the server yet becomes a move to the trash.
+    let copied = tx.execute(
+        "INSERT INTO emails_with_folders (
+           id, folder, server_folder, uid, message_id, from_addr, from_name, to_addr, subject,
+           body_html, body_text, date, is_read, thread_id, created_at, preview, pending_action
+         )
+         SELECT id,
+           CASE WHEN pending_action = 'delete' THEN 'trash' ELSE 'inbox' END,
+           'inbox', uid, message_id, from_addr, from_name, to_addr, subject,
+           body_html, body_text, date, is_read, thread_id, created_at, preview,
+           CASE WHEN pending_action = 'read' THEN 'read' END
+         FROM emails
+         WHERE is_deleted = 0 OR (pending_action = 'delete' AND uid IS NOT NULL)",
+        [],
+    )?;
+    tx.execute_batch(
+        "
+        DELETE FROM email_raw WHERE email_id NOT IN (SELECT id FROM emails_with_folders);
+        DROP TABLE emails;
+        ALTER TABLE emails_with_folders RENAME TO emails;
+        ",
+    )?;
+    // Rebuilt below with the new table
+    tx.execute_batch("DROP TABLE IF EXISTS emails_fts;")?;
+    tx.commit()?;
+    log::info!("Added folders to {copied} emails");
+    Ok(())
 }
 
 // Earlier versions kept the original emails in emails.raw_content; move them to email_raw
@@ -165,4 +221,74 @@ pub fn get_settings(db: &Connection) -> rusqlite::Result<HashMap<String, String>
     db.prepare("SELECT key, value FROM settings")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_inbox_only_database_gets_folders() {
+        let dir = std::env::temp_dir().join(format!("dadmail-migrate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("old.db");
+        let _ = std::fs::remove_file(&path);
+        {
+            // The table as the previous version left it
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE emails (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT UNIQUE NOT NULL,
+                   from_addr TEXT NOT NULL, from_name TEXT NOT NULL, to_addr TEXT NOT NULL,
+                   subject TEXT NOT NULL, body_html TEXT, body_text TEXT, raw_content BLOB,
+                   date INTEGER NOT NULL, is_read INTEGER DEFAULT 0, is_deleted INTEGER DEFAULT 0,
+                   thread_id TEXT, created_at INTEGER, preview TEXT, uid INTEGER, pending_action TEXT
+                 );
+                 CREATE TABLE email_raw (email_id INTEGER PRIMARY KEY, raw BLOB NOT NULL);
+                 INSERT INTO emails (id, message_id, from_addr, from_name, to_addr, subject, body_text, date, is_read, uid, pending_action, preview)
+                 VALUES (1, '<a@x>', 'a@b.cz', 'Anna', 't@s.cz', 'Fotky z chaty', 'ahoj', 1, 1, 10, 'read', 'ahoj'),
+                        (2, '<b@x>', 'b@b.cz', 'Bob', 't@s.cz', 'Smazaný', 'pa', 2, 0, NULL, NULL, 'pa'),
+                        (3, '<c@x>', 'c@b.cz', 'Cyril', 't@s.cz', 'Ke smazání', 'x', 3, 0, 12, 'delete', 'x');
+                 UPDATE emails SET is_deleted = 1 WHERE id IN (2, 3);
+                 INSERT INTO email_raw VALUES (1, x'01'), (2, x'02'), (3, x'03');",
+            )
+            .unwrap();
+        }
+
+        let db = open(&path).unwrap();
+        let rows: Vec<(i64, String, String, Option<String>)> = db
+            .prepare("SELECT id, folder, server_folder, pending_action FROM emails ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (1, "inbox".into(), "inbox".into(), Some("read".into())),
+                // A delete that never reached the server becomes a move to the trash
+                (3, "trash".into(), "inbox".into(), None),
+            ]
+        );
+        let raw_ids: Vec<i64> = db
+            .prepare("SELECT email_id FROM email_raw ORDER BY email_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(raw_ids, vec![1, 3]);
+        let found: i64 = db
+            .query_row("SELECT count(*) FROM emails_fts WHERE emails_fts MATCH '\"chaty\"*'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(found, 1);
+
+        // Opening again changes nothing
+        drop(db);
+        let db = open(&path).unwrap();
+        let count: i64 = db.query_row("SELECT count(*) FROM emails", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

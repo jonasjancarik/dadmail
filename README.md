@@ -19,6 +19,11 @@ npm install
 npm run dev
 ```
 
+Na macOS se nepodepsaná vývojová sestavení po každé změně znovu ptají na přístup do Klíčenky.
+Vývojové sestavení proto umí vzít heslo z proměnné `DADMAIL_PASSWORD`
+(např. `DADMAIL_PASSWORD="$(security find-generic-password -s DadMail -w)" npm run dev`);
+vydaná aplikace ji nečte.
+
 Vzhled lze ladit i v běžném prohlížeči s ukázkovými emaily, bez aplikace a bez
 skutečné schránky: `npm run preview:ui` a otevřít http://localhost:1420
 (`src/renderer/previewApi.js`; do sestavené aplikace se nedostane).

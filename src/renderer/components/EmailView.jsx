@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import DOMPurify from 'dompurify';
 import { api } from '../api';
-import { handleZoomKey } from '../zoom';
+import { handleShortcutKey } from '../shortcuts';
 import Icon from './Icon';
 
 const SANITIZE_OPTIONS = {
@@ -80,14 +80,43 @@ const FRAME_STYLE = `
     white-space: pre-wrap;
     word-wrap: break-word;
   }
+  .print-header {
+    display: none;
+  }
+  @media print {
+    .print-header {
+      display: block;
+      margin: 0 0 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #cbd5e1;
+      font-size: 13px;
+      color: #334155;
+      white-space: normal;
+    }
+    .print-header h1 {
+      font-size: 18px;
+      margin: 0 0 6px;
+      color: #0f172a;
+    }
+  }
   body.plain-text {
     white-space: pre-wrap;
     max-width: 75ch;
   }
 `;
 
-function EmailView({ email, onReply, onDelete, onWriteTo }) {
+const escapeHtml = (text) =>
+  String(text).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+const EmailView = forwardRef(function EmailView(
+  { email, onReply, onForward, onDelete, onRestore, onToggleRead, onWriteTo },
+  ref
+) {
   const iframeRef = useRef(null);
+
+  // Print just the email, with subject, sender and date on top (shown only on paper)
+  const print = () => iframeRef.current?.contentWindow?.print();
+  useImperativeHandle(ref, () => ({ print }));
   const [showImages, setShowImages] = useState(false);
   const [attachmentMessage, setAttachmentMessage] = useState(null);
 
@@ -104,6 +133,7 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
     const doc = iframeRef.current.contentDocument || iframeRef.current.contentWindow.document;
 
     doc.open();
+    // Trimmed: whitespace after </body> would end up inside the body, visible in plain-text emails
     doc.write(`
       <!DOCTYPE html>
       <html lang="cs">
@@ -112,22 +142,24 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
           <meta http-equiv="Content-Security-Policy" content="${framePolicy(showImages)}">
           <style>${FRAME_STYLE}</style>
         </head>
-        <body>${sanitizedHtml}</body>
+        <body><div class="print-header"><h1>${escapeHtml(email.subject || '')}</h1>Od: ${escapeHtml(
+          email.from_name ? `${email.from_name} <${email.from_addr}>` : email.from_addr
+        )}<br>Komu: ${escapeHtml(email.to_addr)}<br>${escapeHtml(formatDate(email.date))}</div>${sanitizedHtml}</body>
       </html>
-    `);
+    `.trim());
     doc.close();
 
     if (!email.body_html) {
       // Plain text goes in as text, so anything that looks like HTML is shown literally
       doc.body.className = 'plain-text';
-      doc.body.textContent = email.body_text || '';
+      doc.body.append(email.body_text || '');
     }
 
     // Show where each link really goes when hovering over it
     doc.querySelectorAll('a[href]').forEach((link) => {
       link.title = link.getAttribute('href');
     });
-    doc.addEventListener('keydown', handleZoomKey);
+    doc.addEventListener('keydown', handleShortcutKey);
     // Links open in the browser; email addresses open a new email in DadMail
     doc.addEventListener('click', (event) => {
       const link = event.target.closest?.('a[href]');
@@ -172,22 +204,41 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
 
   return (
     <article className="h-full flex flex-col">
-      <header className="shrink-0 px-6 pt-4 pb-3 border-b border-ink-200 space-y-3">
-        <div className="flex items-start justify-between gap-4">
-          <h1 className="text-xl font-semibold text-ink-900 [text-wrap:balance] min-w-0">
-            {email.subject || '(Bez předmětu)'}
-          </h1>
-          <div className="flex gap-2 shrink-0">
-            <button onClick={() => onReply(email)} className="btn-primary">
-              <Icon name="reply" className="w-[18px] h-[18px]" />
-              Odpovědět
+      <header className="shrink-0 px-6 pt-3 pb-3 border-b border-ink-200 space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <button onClick={onReply} className="btn-primary" title="Odpovědět (Ctrl+R)">
+            <Icon name="reply" className="w-[18px] h-[18px]" />
+            Odpovědět
+          </button>
+          <button onClick={onForward} className="btn-secondary" title="Přeposlat (Ctrl+L)">
+            <Icon name="forward" className="w-[18px] h-[18px]" />
+            Přeposlat
+          </button>
+          <button onClick={print} className="btn-quiet" title="Vytisknout (Ctrl+P)">
+            <Icon name="print" className="w-[18px] h-[18px]" />
+            Vytisknout
+          </button>
+          <button onClick={onToggleRead} className="btn-quiet" title="Přečtené / nepřečtené (M)">
+            <Icon name={email.is_read ? 'unread' : 'check'} className="w-[18px] h-[18px]" />
+            {email.is_read ? 'Označit jako nepřečtené' : 'Označit jako přečtené'}
+          </button>
+          <div className="flex-1" />
+          {email.folder === 'trash' ? (
+            <button onClick={onRestore} className="btn-secondary">
+              <Icon name="restore" className="w-[18px] h-[18px]" />
+              Obnovit do doručené pošty
             </button>
-            <button onClick={onDelete} className="btn-danger">
+          ) : (
+            <button onClick={onDelete} className="btn-danger" title="Smazat (Delete)">
               <Icon name="trash" className="w-[18px] h-[18px]" />
               Smazat
             </button>
-          </div>
+          )}
         </div>
+
+        <h1 className="text-xl font-semibold text-ink-900 [text-wrap:balance]">
+          {email.subject || '(Bez předmětu)'}
+        </h1>
 
         <div className="flex items-center gap-3">
           <div
@@ -275,7 +326,8 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
             // A new frame when images are allowed: a document's rules can only get stricter
             key={`${email.id}-${showImages}`}
             ref={iframeRef}
-            sandbox="allow-same-origin"
+            // allow-modals lets the email be printed; scripts stay blocked
+            sandbox="allow-same-origin allow-modals"
             className="w-full h-full border-0"
             title="Obsah emailu"
           />
@@ -287,6 +339,6 @@ function EmailView({ email, onReply, onDelete, onWriteTo }) {
       </div>
     </article>
   );
-}
+});
 
 export default EmailView;

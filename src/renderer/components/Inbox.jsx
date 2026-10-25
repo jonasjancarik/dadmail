@@ -6,7 +6,7 @@ import Icon from './Icon';
 const ROW_HEIGHT = 38;
 const OVERSCAN = 10;
 
-function Inbox({ emails, selectedEmail, onEmailClick, loading, searchQuery }) {
+function Inbox({ emails, folder, selectedEmail, onEmailClick, onSortedChange, loading, searchQuery }) {
   const [sortField, setSortField] = useState('date');
   const [sortDirection, setSortDirection] = useState('desc');
   
@@ -25,6 +25,7 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading, searchQuery }) {
   // Callback ref: the scroll container only exists once there are emails to show
   const scrollContainerRef = useCallback((node) => {
     resizeObserver.current?.disconnect();
+    scrollNode.current = node;
     if (!node) return;
     setViewportHeight(node.clientHeight);
     resizeObserver.current = new ResizeObserver(() => setViewportHeight(node.clientHeight));
@@ -84,8 +85,8 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading, searchQuery }) {
       
       switch (sortField) {
         case 'from':
-          aVal = (a.from_name || a.from_addr || '').toLowerCase();
-          bVal = (b.from_name || b.from_addr || '').toLowerCase();
+          aVal = (folder === 'sent' ? a.to_addr : a.from_name || a.from_addr || '').toLowerCase();
+          bVal = (folder === 'sent' ? b.to_addr : b.from_name || b.from_addr || '').toLowerCase();
           break;
         case 'subject':
           aVal = (a.subject || '').toLowerCase();
@@ -102,7 +103,30 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading, searchQuery }) {
       if (aVal > bVal) return sortDirection === 'asc' ? 1 : -1;
       return 0;
     });
-  }, [emails, sortField, sortDirection]);
+  }, [emails, folder, sortField, sortDirection]);
+
+  // In the sent folder the interesting person is the recipient
+  const sent = folder === 'sent';
+  const person = (email) => (sent ? email.to_addr : email.from_name || email.from_addr);
+
+  useEffect(() => {
+    onSortedChange?.(sortedEmails.map((e) => e.id));
+  }, [sortedEmails]);
+
+  // Keep the selected email in view (e.g. when moving with the arrow keys)
+  const scrollNode = useRef(null);
+  useEffect(() => {
+    const node = scrollNode.current;
+    if (!node || !selectedEmail) return;
+    const index = sortedEmails.findIndex((e) => e.id === selectedEmail.id);
+    if (index < 0) return;
+    const top = index * ROW_HEIGHT;
+    const headerHeight = 36;
+    if (top < node.scrollTop) node.scrollTop = top;
+    else if (top + ROW_HEIGHT > node.scrollTop + node.clientHeight - headerHeight) {
+      node.scrollTop = top + ROW_HEIGHT - node.clientHeight + headerHeight;
+    }
+  }, [selectedEmail?.id]);
 
   const firstRow = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
   const lastRow = Math.min(sortedEmails.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
@@ -145,9 +169,13 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading, searchQuery }) {
   if (emails.length === 0) {
     return (
       <div className="h-full flex flex-col items-center justify-center gap-2 text-center px-6">
-        <Icon name={searchQuery ? 'search' : 'mail'} className="w-9 h-9 text-ink-300" />
+        <Icon name={searchQuery ? 'search' : folder === 'trash' ? 'trash' : 'mail'} className="w-9 h-9 text-ink-300" />
         {searchQuery ? (
           <p className="text-ink-600">Nic jsme nenašli pro „{searchQuery}“. Zkuste jiné slovo.</p>
+        ) : folder === 'trash' ? (
+          <p className="text-ink-600">Koš je prázdný.</p>
+        ) : folder === 'sent' ? (
+          <p className="text-ink-600">Zatím tu nejsou žádné odeslané emaily.</p>
         ) : (
           <p className="text-ink-600">Zatím tu nejsou žádné emaily. Stahují se ze Seznamu, chvíli to může trvat.</p>
         )}
@@ -165,7 +193,7 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading, searchQuery }) {
         <thead className="sticky top-0 z-20 bg-white text-xs text-ink-500 shadow-[inset_0_-1px_0_theme(colors.ink.200)]">
           <tr>
             <th className="w-7" aria-label="Nepřečtené"></th>
-            <SortHeader field="from" width={colWidths.from}>Od</SortHeader>
+            <SortHeader field="from" width={colWidths.from}>{sent ? 'Komu' : 'Od'}</SortHeader>
             <SortHeader field="subject" width={colWidths.subject}>Předmět</SortHeader>
             <th className="px-3 h-9 text-left font-medium">Náhled</th>
             <SortHeader field="date" width={colWidths.date} resizable={false}>Datum</SortHeader>
@@ -190,8 +218,8 @@ function Inbox({ emails, selectedEmail, onEmailClick, loading, searchQuery }) {
                 <td className="text-center">
                   {unread && <span className="inline-block w-2 h-2 rounded-full bg-accent-600" title="Nepřečtený" />}
                 </td>
-                <td className="px-3 truncate" title={email.from_addr}>
-                  {email.from_name || email.from_addr}
+                <td className="px-3 truncate" title={sent ? email.to_addr : email.from_addr}>
+                  {person(email)}
                 </td>
                 <td className="px-3 truncate" title={email.subject}>
                   {email.subject || '(Bez předmětu)'}

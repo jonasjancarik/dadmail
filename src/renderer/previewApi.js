@@ -32,21 +32,30 @@ export function createPreviewApi() {
           ? `<p>${text}</p><p><img src="https://picsum.photos/seed/zahrada/600/240" alt="Zahrada"></p><p><a href="https://example.com">Číst celý článek</a></p>`
           : '',
       to_addr: 'jiri@seznam.cz',
+      folder: 'inbox',
       date: now - age - Math.floor(i / SAMPLES.length) * 7 * day,
       is_read: read || i >= SAMPLES.length ? 1 : 0,
       attachments: attachments.map((file_name, index) => ({ index, file_name, size: 180000 + index * 92000, risky: false })),
     };
   });
 
-  const listItem = ({ body_text, body_html, to_addr, attachments, ...rest }) => rest;
+  // A few sent and deleted emails for the other folders
+  emails.push(
+    { id: 101, folder: 'sent', from_name: 'Jiří Novák', from_addr: 'jiri@seznam.cz', to_addr: 'petr.novak@email.cz', subject: 'Re: Fotky z víkendu', preview: 'Děkuji, moc hezké. Babička má radost.', body_text: 'Děkuji, moc hezké. Babička má radost.\n\nTáta', body_html: '', date: now - 3 * hour, is_read: 1, attachments: [] },
+    { id: 102, folder: 'sent', from_name: 'Jiří Novák', from_addr: 'jiri@seznam.cz', to_addr: 'tomas.kucera@centrum.cz', subject: 'Re: Šachy ve čtvrtek?', preview: 'Platí, budu tam v šest.', body_text: 'Platí, budu tam v šest.', body_html: '', date: now - 4 * day, is_read: 1, attachments: [] },
+    { id: 103, folder: 'trash', from_name: 'Výprodej Plus', from_addr: 'akce@vyprodej-plus.cz', to_addr: 'jiri@seznam.cz', subject: 'Sleva 40 % jen dnes', preview: 'Nenechte si ujít naši největší akci roku.', body_text: 'Nenechte si ujít naši největší akci roku.', body_html: '', date: now - 2 * day, is_read: 1, attachments: [] },
+  );
+  let draft = null;
+
+  const listItem = ({ body_text, body_html, attachments, ...rest }) => rest;
   const settings = { email: 'jiri@seznam.cz', has_password: '1', zoom: '1' };
   const ok = (extra = {}) => Promise.resolve({ success: true, ...extra });
 
   return {
-    getEmails: async (query = '') => {
+    getEmails: async (folder = 'inbox', query = '') => {
       const q = query.trim().toLowerCase();
       return emails
-        .filter((e) => !e.deleted && (!q || `${e.subject} ${e.from_name} ${e.body_text}`.toLowerCase().includes(q)))
+        .filter((e) => e.folder === folder && (!q || `${e.subject} ${e.from_name} ${e.body_text}`.toLowerCase().includes(q)))
         .sort((a, b) => b.date - a.date)
         .map(listItem);
     },
@@ -56,9 +65,29 @@ export function createPreviewApi() {
       return { ...email };
     },
     deleteEmail: async (id) => {
-      emails.find((e) => e.id === id).deleted = true;
+      emails.find((e) => e.id === id).folder = 'trash';
       return ok();
     },
+    restoreEmail: async (id) => {
+      emails.find((e) => e.id === id).folder = 'inbox';
+      return ok();
+    },
+    markUnread: async (id) => {
+      emails.find((e) => e.id === id).is_read = 0;
+      return ok();
+    },
+    folderCounts: async () =>
+      Object.fromEntries(['inbox', 'sent', 'trash'].map((f) => [f, emails.filter((e) => e.folder === f && !e.is_read).length])),
+    getContacts: async () => [
+      { name: 'Petr Novák', address: 'petr.novak@email.cz' },
+      { name: 'Jana Dvořáková', address: 'jana.dvorakova@seznam.cz' },
+      { name: 'Tomáš Kučera', address: 'tomas.kucera@centrum.cz' },
+    ],
+    getDraft: async () => draft,
+    saveDraft: async (d) => {
+      draft = d;
+    },
+    pickFiles: async () => [{ path: '/Users/ukazka/Obrazky/zahrada.jpg', name: 'zahrada.jpg', size: 2310000 }],
     getSettings: async () => ({ ...settings }),
     saveSettings: async (s) => {
       Object.assign(settings, s);

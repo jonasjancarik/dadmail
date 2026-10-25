@@ -21,9 +21,19 @@ function subscribe(event, callback) {
 }
 
 const tauriApi = {
-  getEmails: (searchQuery) => invoke('get_emails', { searchQuery }),
+  getEmails: (folder, searchQuery) => invoke('get_emails', { folder, searchQuery }),
   getEmail: (id) => invoke('get_email', { id }),
   deleteEmail: (id) => withStatus('delete_email', { id }),
+  restoreEmail: (id) => withStatus('restore_email', { id }),
+  markUnread: (id) => withStatus('mark_unread', { id }),
+  folderCounts: () => invoke('folder_counts'),
+  getContacts: () => invoke('get_contacts').catch(() => []),
+  getDraft: async () => {
+    const draft = await invoke('get_draft').catch(() => null);
+    return draft ? JSON.parse(draft) : null;
+  },
+  saveDraft: (draft) => invoke('save_draft', { draft: draft ? JSON.stringify(draft) : null }).catch(() => {}),
+  pickFiles: () => invoke('pick_files').catch(() => []),
   getSettings: () => invoke('get_settings'),
   saveSettings: (settings) => withStatus('save_settings', { settings }),
   sendEmail: (email) => withStatus('send_email', { email }),

@@ -32,6 +32,7 @@ struct EmailListItem {
     id: i64,
     from_addr: String,
     from_name: String,
+    to_addr: String,
     subject: String,
     preview: Option<String>,
     date: i64,
@@ -41,6 +42,7 @@ struct EmailListItem {
 #[derive(Serialize)]
 struct Email {
     id: i64,
+    folder: String,
     message_id: String,
     from_addr: String,
     from_name: String,
@@ -67,7 +69,7 @@ fn czech_count(n: i64, one: &str, few: &str, many: &str) -> String {
 // Unread count in the window title (shown on the Windows taskbar) and on the macOS dock icon
 pub(crate) fn update_unread_count(app: &AppHandle, conn: &Connection) {
     let unread: i64 = conn
-        .query_row("SELECT count(*) FROM emails WHERE is_read = 0 AND is_deleted = 0", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM emails WHERE is_read = 0 AND folder = 'inbox'", [], |r| r.get(0))
         .unwrap_or(0);
     let Some(window) = app.get_webview_window("main") else { return };
     let title = if unread == 0 {
@@ -133,25 +135,30 @@ fn to_fts_query(search_query: &str) -> String {
 }
 
 #[tauri::command]
-async fn get_emails(state: State<'_, AppState>, search_query: Option<String>) -> CommandResult<Vec<EmailListItem>> {
+async fn get_emails(
+    state: State<'_, AppState>,
+    folder: Option<String>,
+    search_query: Option<String>,
+) -> CommandResult<Vec<EmailListItem>> {
     let started = std::time::Instant::now();
     let conn = state.db.lock().unwrap();
+    let folder = folder.unwrap_or_else(|| "inbox".into());
     let fts_query = to_fts_query(search_query.as_deref().unwrap_or(""));
-    let columns = "e.id, e.from_addr, e.from_name, e.subject, e.preview, e.date, e.is_read";
+    let columns = "e.id, e.from_addr, e.from_name, e.to_addr, e.subject, e.preview, e.date, e.is_read";
     let (sql, args): (String, Vec<String>) = if fts_query.is_empty() {
         (
-            format!("SELECT {columns} FROM emails e WHERE e.is_deleted = 0 ORDER BY e.date DESC"),
-            vec![],
+            format!("SELECT {columns} FROM emails e WHERE e.folder = ? ORDER BY e.date DESC"),
+            vec![folder],
         )
     } else {
         (
             format!(
                 "SELECT {columns} FROM emails_fts
                  JOIN emails e ON e.id = emails_fts.rowid
-                 WHERE emails_fts MATCH ? AND e.is_deleted = 0
+                 WHERE emails_fts MATCH ? AND e.folder = ?
                  ORDER BY e.date DESC"
             ),
-            vec![fts_query],
+            vec![fts_query, folder],
         )
     };
     let emails = conn
@@ -162,10 +169,11 @@ async fn get_emails(state: State<'_, AppState>, search_query: Option<String>) ->
                 id: r.get(0)?,
                 from_addr: r.get(1)?,
                 from_name: r.get(2)?,
-                subject: r.get(3)?,
-                preview: r.get(4)?,
-                date: r.get(5)?,
-                is_read: r.get(6)?,
+                to_addr: r.get(3)?,
+                subject: r.get(4)?,
+                preview: r.get(5)?,
+                date: r.get(6)?,
+                is_read: r.get(7)?,
             })
         })
         .map_err(to_string_error)?
@@ -182,13 +190,14 @@ async fn get_email(app: AppHandle, state: State<'_, AppState>, id: i64) -> Comma
         .query_row(
             "SELECT id, message_id, from_addr, from_name, to_addr, subject,
                body_html, body_text, date, is_read, thread_id,
-               (SELECT raw FROM email_raw WHERE email_id = emails.id)
+               (SELECT raw FROM email_raw WHERE email_id = emails.id), folder
              FROM emails WHERE id = ?",
             [id],
             |r| {
                 Ok((
                     Email {
                         id: r.get(0)?,
+                        folder: r.get(12)?,
                         message_id: r.get(1)?,
                         from_addr: r.get(2)?,
                         from_name: r.get(3)?,
@@ -223,7 +232,7 @@ async fn get_email(app: AppHandle, state: State<'_, AppState>, id: i64) -> Comma
     // Mark as read, here and (on the next sync) on the server
     if email.is_read == 0 {
         conn.execute(
-            "UPDATE emails SET is_read = 1, pending_action = COALESCE(pending_action, 'read') WHERE id = ?",
+            "UPDATE emails SET is_read = 1, pending_action = 'read' WHERE id = ?",
             [id],
         )
         .map_err(to_string_error)?;
@@ -233,18 +242,133 @@ async fn get_email(app: AppHandle, state: State<'_, AppState>, id: i64) -> Comma
     Ok(Some(email))
 }
 
+// Moving between folders happens here right away; the sync then moves the email on the
+// server. Deleting does not wake the sync, which leaves time for "Vrátit" (undo).
+fn move_email(app: &AppHandle, state: &State<'_, AppState>, id: i64, folder: &str) -> CommandResult<()> {
+    let conn = state.db.lock().unwrap();
+    match conn.execute("UPDATE emails SET folder = ? WHERE id = ?", params![folder, id]) {
+        Ok(_) => {}
+        // The same email is already in that folder: this copy can simply go
+        Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == rusqlite::ErrorCode::ConstraintViolation => {
+            conn.execute("DELETE FROM emails WHERE id = ?", [id]).map_err(to_string_error)?;
+        }
+        Err(e) => return Err(e.to_string()),
+    }
+    update_unread_count(app, &conn);
+    Ok(())
+}
+
 #[tauri::command]
 async fn delete_email(app: AppHandle, state: State<'_, AppState>, id: i64) -> CommandResult<()> {
+    move_email(&app, &state, id, "trash")
+}
+
+// Back to the inbox, from the trash or straight after deleting ("Vrátit")
+#[tauri::command]
+async fn restore_email(app: AppHandle, state: State<'_, AppState>, id: i64) -> CommandResult<()> {
+    move_email(&app, &state, id, "inbox")?;
+    state.sync_now.notify_one();
+    Ok(())
+}
+
+#[tauri::command]
+async fn mark_unread(app: AppHandle, state: State<'_, AppState>, id: i64) -> CommandResult<()> {
     let conn = state.db.lock().unwrap();
-    // Hidden here right away; the next sync moves it to the server's trash
-    conn.execute(
-        "UPDATE emails SET is_deleted = 1, pending_action = 'delete' WHERE id = ?",
-        [id],
-    )
-    .map_err(to_string_error)?;
+    conn.execute("UPDATE emails SET is_read = 0, pending_action = 'unread' WHERE id = ?", [id])
+        .map_err(to_string_error)?;
     update_unread_count(&app, &conn);
     state.sync_now.notify_one();
     Ok(())
+}
+
+// Unread emails per folder, for the folder list
+#[tauri::command]
+async fn folder_counts(state: State<'_, AppState>) -> CommandResult<HashMap<String, i64>> {
+    let conn = state.db.lock().unwrap();
+    let mut counts: HashMap<String, i64> = db::FOLDERS.iter().map(|f| (f.to_string(), 0)).collect();
+    let rows = conn
+        .prepare("SELECT folder, count(*) FROM emails WHERE is_read = 0 GROUP BY folder")
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(to_string_error)?;
+    counts.extend(rows);
+    Ok(counts)
+}
+
+#[derive(Serialize)]
+struct Contact {
+    name: String,
+    address: String,
+}
+
+// People Dad has emailed with, for suggestions in "Komu". People he has written to come first;
+// automated senders (notifications, newsletters) are left out.
+#[tauri::command]
+async fn get_contacts(state: State<'_, AppState>) -> CommandResult<Vec<Contact>> {
+    let conn = state.db.lock().unwrap();
+    let own = db::get_setting(&conn, "email").map_err(to_string_error)?.unwrap_or_default();
+    conn.prepare(
+        "SELECT address, max(name), sum(weight) AS score, max(date) AS last FROM (
+           SELECT lower(from_addr) AS address, from_name AS name, date, 1 AS weight FROM emails WHERE folder != 'sent'
+           UNION ALL
+           SELECT lower(to_addr), '', date, 10 FROM emails WHERE folder = 'sent'
+         )
+         WHERE address LIKE '%@%' AND address != lower(?)
+           AND address NOT LIKE '%noreply%' AND address NOT LIKE '%no-reply%' AND address NOT LIKE '%donotreply%'
+           AND address NOT LIKE '%notifikace%' AND address NOT LIKE '%notification%'
+           AND address NOT LIKE '%newsletter%' AND address NOT LIKE '%mailer-daemon%'
+         GROUP BY address
+         ORDER BY score DESC, last DESC
+         LIMIT 300",
+    )
+    .and_then(|mut stmt| {
+        stmt.query_map([own], |r| Ok(Contact { address: r.get(0)?, name: r.get(1)? }))?
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .map_err(to_string_error)
+}
+
+// One draft of the email being written, so closing the window by mistake loses nothing
+#[tauri::command]
+async fn get_draft(state: State<'_, AppState>) -> CommandResult<Option<String>> {
+    db::get_setting(&state.db.lock().unwrap(), "draft").map_err(to_string_error)
+}
+
+#[tauri::command]
+async fn save_draft(state: State<'_, AppState>, draft: Option<String>) -> CommandResult<()> {
+    let conn = state.db.lock().unwrap();
+    match draft {
+        Some(draft) => db::set_setting(&conn, "draft", &draft),
+        None => conn.execute("DELETE FROM settings WHERE key = 'draft'", []).map(|_| ()),
+    }
+    .map_err(to_string_error)
+}
+
+#[derive(Serialize)]
+struct PickedFile {
+    path: String,
+    name: String,
+    size: u64,
+}
+
+// "Přiložit soubor": the system's file picker
+#[tauri::command]
+async fn pick_files(app: AppHandle) -> CommandResult<Vec<PickedFile>> {
+    use tauri_plugin_dialog::DialogExt;
+    let picked = app.dialog().file().set_title("Vyberte soubory k přiložení").blocking_pick_files();
+    let mut files = Vec::new();
+    for path in picked.unwrap_or_default() {
+        let path = path.into_path().map_err(to_string_error)?;
+        let size = std::fs::metadata(&path).map_err(to_string_error)?.len();
+        files.push(PickedFile {
+            name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            path: path.to_string_lossy().into_owned(),
+            size,
+        });
+    }
+    Ok(files)
 }
 
 // The password itself never goes to the UI, only whether one is saved
@@ -297,7 +421,21 @@ struct SendEmailRequest {
     subject: String,
     text: String,
     reply_to_id: Option<i64>,
+    #[serde(default)]
+    attachments: Vec<OutgoingAttachment>,
 }
+
+// A file picked from the computer, or an attachment of an email being forwarded
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum OutgoingAttachment {
+    File { path: String },
+    #[serde(rename_all = "camelCase")]
+    Original { email_id: i64, index: usize },
+}
+
+// Seznam accepts emails up to about 30 MB; attachments grow by a third when sent
+const MAX_ATTACHMENTS: u64 = 20 * 1024 * 1024;
 
 #[tauri::command]
 async fn send_email(state: State<'_, AppState>, email: SendEmailRequest) -> CommandResult<()> {
@@ -314,6 +452,26 @@ async fn send_email(state: State<'_, AppState>, email: SendEmailRequest) -> Comm
         (from, password, in_reply_to)
     };
 
+    let mut attachments = Vec::new();
+    for attachment in &email.attachments {
+        attachments.push(match attachment {
+            OutgoingAttachment::File { path } => {
+                let path = std::path::Path::new(path);
+                let contents = std::fs::read(path).map_err(|_| "Přiložený soubor se nepodařilo načíst.".to_string())?;
+                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                (name, contents)
+            }
+            OutgoingAttachment::Original { email_id, index } => load_attachment(&state, *email_id, *index)?,
+        });
+    }
+    let total: u64 = attachments.iter().map(|(_, contents)| contents.len() as u64).sum();
+    if total > MAX_ATTACHMENTS {
+        return Err(format!(
+            "Přílohy jsou dohromady moc velké ({} MB). Poslat jde nejvýš 20 MB, zkuste jich poslat méně.",
+            total / 1024 / 1024
+        ));
+    }
+
     // Ensure a reply's subject starts with Re:
     let mut subject = email.subject;
     if in_reply_to.is_some() && !subject.starts_with("Re:") && !subject.starts_with("RE:") {
@@ -327,14 +485,17 @@ async fn send_email(state: State<'_, AppState>, email: SendEmailRequest) -> Comm
         subject,
         text: email.text,
         in_reply_to,
+        attachments,
     })
     .await?;
 
-    // The email is sent; saving the copy can finish in the background
+    // The email is sent; saving the copy can finish in the background, then the sync shows it
+    let sync_now = state.sync_now.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(e) = imap::save_to_sent(&from, &password, &sent.message_id, &sent.raw).await {
             log::error!("Could not save the sent email to the Sent folder: {e}");
         }
+        sync_now.notify_one();
     });
     Ok(())
 }
@@ -358,7 +519,8 @@ async fn clear_emails(state: State<'_, AppState>) -> CommandResult<()> {
     // Delete all emails and reset sync progress, but keep credentials
     conn.execute("DELETE FROM emails", []).map_err(to_string_error)?;
     conn.execute(
-        "DELETE FROM settings WHERE key IN ('sync_newest_uid', 'sync_oldest_uid')",
+        "DELETE FROM settings WHERE key LIKE 'sync_newest_uid%' OR key LIKE 'sync_oldest_uid%'
+           OR key LIKE 'sync_uids_matched%' OR key LIKE 'sync_uidvalidity%'",
         [],
     )
     .map_err(to_string_error)?;
@@ -523,6 +685,7 @@ fn move_password_out_of_database(conn: &Connection) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_log::Builder::default()
@@ -564,6 +727,13 @@ pub fn run() {
             get_emails,
             get_email,
             delete_email,
+            restore_email,
+            mark_unread,
+            folder_counts,
+            get_contacts,
+            get_draft,
+            save_draft,
+            pick_files,
             get_settings,
             save_settings,
             send_email,

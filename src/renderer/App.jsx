@@ -5,8 +5,19 @@ import Compose from './components/Compose';
 import Settings from './components/Settings';
 import SearchBar from './components/SearchBar';
 import { api } from './api';
-import { initZoom, handleZoomKey } from './zoom';
+import { initZoom } from './zoom';
+import { setShortcutHandler, handleShortcutKey } from './shortcuts';
 import Icon from './components/Icon';
+
+// Folder names as Thunderbird shows them in Czech
+const FOLDERS = [
+  { id: 'inbox', label: 'Doručená pošta', icon: 'mail' },
+  { id: 'sent', label: 'Odeslaná pošta', icon: 'send' },
+  { id: 'trash', label: 'Koš', icon: 'trash' },
+];
+
+// How long "Vrátit" stays available after deleting
+const UNDO_SECONDS = 8;
 
 // What the background sync is doing, next to the toolbar buttons
 function SyncStatus({ status }) {
@@ -30,23 +41,59 @@ function SyncStatus({ status }) {
   );
 }
 
+function FolderList({ folder, counts, onSelect }) {
+  return (
+    <nav className="w-60 shrink-0 bg-ink-50 border-r border-ink-200 p-2 space-y-0.5" aria-label="Složky">
+      {FOLDERS.map((f) => {
+        const active = f.id === folder;
+        const unread = counts[f.id] || 0;
+        return (
+          <button
+            key={f.id}
+            onClick={() => onSelect(f.id)}
+            aria-current={active ? 'page' : undefined}
+            className={`w-full h-10 px-3 flex items-center gap-3 rounded-lg text-left transition-colors ${
+              active ? 'bg-accent-100 text-accent-900 font-semibold' : 'text-ink-700 hover:bg-ink-100'
+            }`}
+          >
+            <Icon name={f.icon} className={`w-[18px] h-[18px] ${active ? 'text-accent-700' : 'text-ink-500'}`} />
+            <span className="flex-1 truncate">{f.label}</span>
+            {unread > 0 && f.id !== 'sent' && (
+              <span className="min-w-6 px-1.5 rounded-md bg-accent-700 text-white text-xs font-semibold text-center tabular-nums">
+                {unread}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
 function App() {
+  const [folder, setFolder] = useState('inbox');
+  const folderRef = useRef('inbox');
   const [emails, setEmails] = useState([]);
+  const [counts, setCounts] = useState({});
   const [selectedEmail, setSelectedEmail] = useState(null);
-  const [showCompose, setShowCompose] = useState(false);
+  // What the compose window was opened for: { mode: 'new' | 'reply' | 'forward', email?, to? }
+  const [compose, setCompose] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
-  const [replyToEmail, setReplyToEmail] = useState(null);
-  const [composeTo, setComposeTo] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const searchQueryRef = useRef('');
   const [loading, setLoading] = useState(true);
-  const [settings, setSettings] = useState({});
   const [syncStatus, setSyncStatus] = useState({ status: 'idle', message: '' });
   // A newer DadMail version, and whether it is being installed
   const [update, setUpdate] = useState(null);
+  // The "Vrátit" bar after deleting
+  const [undo, setUndo] = useState(null);
+  const undoTimer = useRef(null);
   const [paneHeight, setPaneHeight] = useState(300); // pixels for top pane
   const isDraggingPane = useRef(false);
   const containerRef = useRef(null);
+  const emailViewRef = useRef(null);
+  // The list in its current sort order, for moving with the arrow keys
+  const sortedIds = useRef([]);
 
   const handlePaneMouseDown = useCallback((e) => {
     e.preventDefault();
@@ -73,11 +120,11 @@ function App() {
 
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
-    document.addEventListener('keydown', handleZoomKey);
+    document.addEventListener('keydown', handleShortcutKey);
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
-      document.removeEventListener('keydown', handleZoomKey);
+      document.removeEventListener('keydown', handleShortcutKey);
     };
   }, []);
 
@@ -94,10 +141,10 @@ function App() {
       unsubscribers.push(api.onEmailsUpdated((count) => {
         loadEmails();
         if (count > 0) {
-          setSyncStatus({ status: 'success', message: `+${count} nových` });
+          setSyncStatus({ status: 'success', message: count === 1 ? 'Přišel nový email' : `Přišly nové emaily: ${count}` });
           setTimeout(() => {
             setSyncStatus(prev => prev.status === 'success' ? { status: 'idle', message: '' } : prev);
-          }, 3000);
+          }, 4000);
         }
       }));
 
@@ -132,7 +179,6 @@ function App() {
 
   const loadSettings = async () => {
     const loadedSettings = await api.getSettings();
-    setSettings(loadedSettings);
     initZoom(loadedSettings.zoom);
     if (!loadedSettings.email || loadedSettings.has_password !== '1') {
       setShowSettings(true);
@@ -142,9 +188,13 @@ function App() {
   const loadEmails = async () => {
     setLoading(true);
     try {
-      // Read the query from a ref so sync-triggered reloads keep the current search
-      const loadedEmails = await api.getEmails(searchQueryRef.current);
+      // Read folder and query from refs so sync-triggered reloads keep what is shown
+      const [loadedEmails, loadedCounts] = await Promise.all([
+        api.getEmails(folderRef.current, searchQueryRef.current),
+        api.folderCounts(),
+      ]);
       setEmails(loadedEmails);
+      setCounts(loadedCounts);
     } catch (error) {
       console.error('Error loading emails:', error);
     } finally {
@@ -152,11 +202,20 @@ function App() {
     }
   };
 
+  const openFolder = (id) => {
+    folderRef.current = id;
+    setFolder(id);
+    setSelectedEmail(null);
+    setEmails([]);
+    loadEmails();
+  };
+
   const handleEmailClick = async (emailId) => {
     const email = await api.getEmail(emailId);
     setSelectedEmail(email);
     // Opening marks the email as read; update the list locally instead of reloading it
     setEmails(prev => prev.map(e => (e.id === emailId && !e.is_read ? { ...e, is_read: 1 } : e)));
+    setCounts(prev => (email && !email.is_read ? { ...prev, [folderRef.current]: Math.max(0, (prev[folderRef.current] || 1) - 1) } : prev));
   };
 
   // Check Seznam for new mail now, like Thunderbird's "Načíst zprávy"
@@ -165,36 +224,90 @@ function App() {
     loadEmails();
   };
 
-  const handleReply = (email) => {
-    setReplyToEmail(email);
-    setShowCompose(true);
-  };
-
-  // An email address clicked inside an email
-  const handleWriteTo = (address) => {
-    setReplyToEmail(null);
-    setComposeTo(address);
-    setShowCompose(true);
-  };
-
-  const handleComposeClose = () => {
-    setShowCompose(false);
-    setReplyToEmail(null);
-    setComposeTo('');
-  };
+  const startCompose = (mode, email = null, to = '') => setCompose({ mode, email, to });
 
   const handleEmailSent = () => {
-    handleComposeClose();
+    setCompose(null);
     loadEmails();
   };
 
+  const showUndo = (email) => {
+    clearTimeout(undoTimer.current);
+    setUndo({ id: email.id });
+    undoTimer.current = setTimeout(() => setUndo(null), UNDO_SECONDS * 1000);
+  };
+
   const handleDelete = async () => {
-    if (selectedEmail) {
-      await api.deleteEmail(selectedEmail.id);
-      setSelectedEmail(null);
-      loadEmails();
+    if (!selectedEmail || folderRef.current === 'trash') return;
+    // Select the next email, as Thunderbird does
+    const ids = sortedIds.current;
+    const next = ids[ids.indexOf(selectedEmail.id) + 1] ?? ids[ids.indexOf(selectedEmail.id) - 1];
+    await api.deleteEmail(selectedEmail.id);
+    showUndo(selectedEmail);
+    setSelectedEmail(null);
+    await loadEmails();
+    if (next) handleEmailClick(next);
+  };
+
+  const handleUndo = async () => {
+    clearTimeout(undoTimer.current);
+    const id = undo?.id;
+    setUndo(null);
+    if (id) {
+      await api.restoreEmail(id);
+      await loadEmails();
+      if (folderRef.current === 'inbox') handleEmailClick(id);
     }
   };
+
+  const handleRestore = async () => {
+    if (!selectedEmail) return;
+    await api.restoreEmail(selectedEmail.id);
+    setSelectedEmail(null);
+    loadEmails();
+  };
+
+  const toggleRead = async () => {
+    if (!selectedEmail) return;
+    if (selectedEmail.is_read) {
+      await api.markUnread(selectedEmail.id);
+      setSelectedEmail({ ...selectedEmail, is_read: 0 });
+      loadEmails();
+    } else {
+      handleEmailClick(selectedEmail.id);
+    }
+  };
+
+  const moveSelection = (step) => {
+    const ids = sortedIds.current;
+    if (ids.length === 0) return;
+    const index = selectedEmail ? ids.indexOf(selectedEmail.id) : -1;
+    const next = ids[Math.min(Math.max(index + step, 0), ids.length - 1)];
+    if (next && next !== selectedEmail?.id) handleEmailClick(next);
+  };
+
+  // Thunderbird's keys. Kept in a ref so the handler always sees the current state.
+  const shortcutRef = useRef(null);
+  shortcutRef.current = (event) => {
+    if (compose || showSettings) return;
+    const ctrl = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    const typing = event.target.ownerDocument === document && ['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName);
+    const run = (action) => {
+      event.preventDefault();
+      action();
+    };
+    if (ctrl && key === 'n') return run(() => startCompose('new'));
+    if (ctrl && key === 'r' && selectedEmail) return run(() => startCompose('reply', selectedEmail));
+    if (ctrl && key === 'l' && selectedEmail) return run(() => startCompose('forward', selectedEmail));
+    if (ctrl && key === 'p' && selectedEmail) return run(() => emailViewRef.current?.print());
+    if (typing || ctrl || event.altKey) return;
+    if (event.key === 'ArrowDown') return run(() => moveSelection(1));
+    if (event.key === 'ArrowUp') return run(() => moveSelection(-1));
+    if (event.key === 'Delete' && selectedEmail) return run(handleDelete);
+    if (key === 'm' && selectedEmail) return run(toggleRead);
+  };
+  useEffect(() => setShortcutHandler((event) => shortcutRef.current(event)), []);
 
   if (showSettings) {
     return (
@@ -218,7 +331,7 @@ function App() {
           <span className="text-lg font-semibold tracking-tight text-ink-900">DadMail</span>
         </div>
 
-        <button onClick={() => setShowCompose(true)} className="btn-primary">
+        <button onClick={() => startCompose('new')} className="btn-primary" title="Nový email (Ctrl+N)">
           <Icon name="compose" className="w-[18px] h-[18px]" />
           Nový email
         </button>
@@ -264,52 +377,72 @@ function App() {
         </div>
       )}
 
-      {/* Main Content - Vertical Split */}
-      <main ref={containerRef} className="flex-1 flex flex-col overflow-hidden">
-        {/* Email List (Top) */}
-        <div style={{ height: paneHeight }} className="min-h-[100px] overflow-hidden flex-shrink-0 bg-white">
-          <Inbox
-            emails={emails}
-            selectedEmail={selectedEmail}
-            onEmailClick={handleEmailClick}
-            loading={loading}
-            searchQuery={searchQuery}
-          />
-        </div>
+      <div className="flex-1 flex overflow-hidden">
+        <FolderList folder={folder} counts={counts} onSelect={openFolder} />
 
-        {/* Resizable Divider */}
-        <div
-          onMouseDown={handlePaneMouseDown}
-          className="group h-2 shrink-0 cursor-ns-resize bg-ink-100 border-y border-ink-200 flex items-center justify-center"
-          title="Přetažením změníte velikost"
-        >
-          <div className="w-10 h-1 rounded-full bg-ink-300 group-hover:bg-accent-500 transition-colors" />
-        </div>
-
-        {/* Email Content (Bottom) */}
-        <div className="flex-1 overflow-hidden bg-white">
-          {selectedEmail ? (
-            <EmailView
-              email={selectedEmail}
-              onReply={handleReply}
-              onDelete={handleDelete}
-              onWriteTo={handleWriteTo}
+        {/* Main Content - Vertical Split */}
+        <main ref={containerRef} className="flex-1 min-w-0 flex flex-col overflow-hidden">
+          {/* Email List (Top) */}
+          <div style={{ height: paneHeight }} className="min-h-[100px] overflow-hidden flex-shrink-0 bg-white">
+            <Inbox
+              emails={emails}
+              folder={folder}
+              selectedEmail={selectedEmail}
+              onEmailClick={handleEmailClick}
+              onSortedChange={(ids) => { sortedIds.current = ids; }}
+              loading={loading}
+              searchQuery={searchQuery}
             />
-          ) : (
-            <div className="h-full flex flex-col items-center justify-center gap-3 text-ink-400">
-              <Icon name="mail" className="w-10 h-10" />
-              <p className="text-base text-ink-500">Klikněte na email v seznamu nahoře a zobrazí se tady.</p>
-            </div>
-          )}
-        </div>
-      </main>
+          </div>
 
-      {/* Compose Modal */}
-      {showCompose && (
+          {/* Resizable Divider */}
+          <div
+            onMouseDown={handlePaneMouseDown}
+            className="group h-2 shrink-0 cursor-ns-resize bg-ink-100 border-y border-ink-200 flex items-center justify-center"
+            title="Přetažením změníte velikost"
+          >
+            <div className="w-10 h-1 rounded-full bg-ink-300 group-hover:bg-accent-500 transition-colors" />
+          </div>
+
+          {/* Email Content (Bottom) */}
+          <div className="flex-1 overflow-hidden bg-white">
+            {selectedEmail ? (
+              <EmailView
+                ref={emailViewRef}
+                email={selectedEmail}
+                onReply={() => startCompose('reply', selectedEmail)}
+                onForward={() => startCompose('forward', selectedEmail)}
+                onDelete={handleDelete}
+                onRestore={handleRestore}
+                onToggleRead={toggleRead}
+                onWriteTo={(address) => startCompose('new', null, address)}
+              />
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center gap-3 text-ink-400">
+                <Icon name="mail" className="w-10 h-10" />
+                <p className="text-base text-ink-500">Klikněte na email v seznamu nahoře a zobrazí se tady.</p>
+              </div>
+            )}
+          </div>
+        </main>
+      </div>
+
+      {undo && (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 flex items-center gap-4 pl-4 pr-2 h-12 rounded-xl bg-ink-900 text-white shadow-dialog" role="status">
+          <Icon name="trash" className="w-[18px] h-[18px] text-ink-300" />
+          <span>Email je v koši.</span>
+          <button onClick={handleUndo} className="btn h-9 bg-white/10 hover:bg-white/20 text-white">
+            Vrátit
+          </button>
+        </div>
+      )}
+
+      {compose && (
         <Compose
-          replyTo={replyToEmail}
-          initialTo={composeTo}
-          onClose={handleComposeClose}
+          mode={compose.mode}
+          source={compose.email}
+          initialTo={compose.to}
+          onClose={() => setCompose(null)}
           onSent={handleEmailSent}
         />
       )}

@@ -1,4 +1,5 @@
 use lettre::message::header::ContentType;
+use lettre::message::{Attachment, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 
@@ -10,6 +11,8 @@ pub struct OutgoingEmail {
     pub text: String,
     // Message-ID of the email being replied to, for threading
     pub in_reply_to: Option<String>,
+    // File name and contents
+    pub attachments: Vec<(String, Vec<u8>)>,
 }
 
 // A sent email, kept so a copy can be saved to the Sent folder
@@ -27,10 +30,18 @@ pub async fn send_email(email: OutgoingEmail) -> Result<SentEmail, String> {
     if let Some(id) = email.in_reply_to {
         builder = builder.in_reply_to(id.clone()).references(id);
     }
-    let message = builder
-        .header(ContentType::TEXT_PLAIN)
-        .body(email.text)
-        .map_err(|e| e.to_string())?;
+    let message = if email.attachments.is_empty() {
+        builder.header(ContentType::TEXT_PLAIN).body(email.text)
+    } else {
+        let mut parts = MultiPart::mixed().singlepart(SinglePart::plain(email.text));
+        for (name, contents) in email.attachments {
+            let mime = mime_guess::from_path(&name).first_or_octet_stream().to_string();
+            let content_type = ContentType::parse(&mime).unwrap_or(ContentType::parse("application/octet-stream").unwrap());
+            parts = parts.singlepart(Attachment::new(name).body(contents, content_type));
+        }
+        builder.multipart(parts)
+    }
+    .map_err(|e| e.to_string())?;
 
     // relay() connects on port 465 with TLS
     let mailer = AsyncSmtpTransport::<Tokio1Executor>::relay("smtp.seznam.cz")

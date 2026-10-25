@@ -15,6 +15,12 @@ fn entry(email: &str) -> keyring::Result<keyring::Entry> {
 }
 
 pub fn get_password(email: &str) -> Option<String> {
+    // Development builds only: unsigned builds on macOS make the Keychain ask for permission
+    // after every rebuild, so a password can be passed in instead
+    #[cfg(debug_assertions)]
+    if let Ok(password) = std::env::var("DADMAIL_PASSWORD") {
+        return Some(password);
+    }
     if let Some(password) = CACHE.lock().unwrap().get(email) {
         return Some(password.clone());
     }

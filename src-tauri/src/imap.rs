@@ -12,7 +12,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
-use crate::db::{get_setting, get_settings, set_setting};
+use crate::db::{get_setting, get_settings, set_setting, FOLDERS};
 use crate::parse::parse_raw_email;
 use crate::{errors, secrets};
 
@@ -145,111 +145,167 @@ pub async fn find_folder(
         .unwrap_or_else(|| fallback.to_string())
 }
 
-// Send reads and deletes made in DadMail to the server
-async fn push_pending_actions(session: &mut ImapSession, db: &Db) -> Result<(), String> {
-    let pending = |action: &str| -> Result<Vec<u32>, String> {
-        let conn = db.lock().unwrap();
-        conn.prepare("SELECT uid FROM emails WHERE pending_action = ? AND uid IS NOT NULL")
-            .and_then(|mut stmt| stmt.query_map([action], |r| r.get(0))?.collect())
-            .map_err(|e| e.to_string())
-    };
-
-    let reads = pending("read")?;
-    for chunk in reads.chunks(UIDS_PER_COMMAND) {
-        session
-            .uid_store(uid_set(chunk), "+FLAGS.SILENT (\\Seen)")
-            .await
-            .map_err(|e| e.to_string())?
-            .try_collect::<Vec<_>>()
-            .await
-            .map_err(|e| e.to_string())?;
-        let conn = db.lock().unwrap();
-        for uid in chunk {
-            conn.execute(
-                "UPDATE emails SET pending_action = NULL WHERE uid = ? AND pending_action = 'read'",
-                [uid],
-            )
-            .map_err(|e| e.to_string())?;
-        }
+// The settings key for a folder's sync state. The inbox keeps the names from before folders.
+fn state_key(folder: &str, base: &str) -> String {
+    if folder == "inbox" {
+        base.to_string()
+    } else {
+        format!("{base}:{folder}")
     }
-
-    let deletes = pending("delete")?;
-    if !deletes.is_empty() {
-        let trash = find_folder(session, NameAttribute::Trash, "trash").await;
-        for chunk in deletes.chunks(UIDS_PER_COMMAND) {
-            session
-                .uid_mv(uid_set(chunk), &trash)
-                .await
-                .map_err(|e| e.to_string())?;
-            // The email is no longer in INBOX, so its UID there no longer applies
-            let conn = db.lock().unwrap();
-            for uid in chunk {
-                conn.execute(
-                    "UPDATE emails SET pending_action = NULL, uid = NULL WHERE uid = ?",
-                    [uid],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-        }
-    }
-    if !reads.is_empty() || !deletes.is_empty() {
-        log::info!("Sent to server: {} read, {} moved to trash", reads.len(), deletes.len());
-    }
-    Ok(())
 }
 
-// Emails stored before DadMail tracked UIDs: find their UIDs by Message-ID.
-// Runs once per UIDVALIDITY; emails downloaded later get their UID when stored.
-async fn map_missing_uids(session: &mut ImapSession, db: &Db, all_uids: &[u32]) -> Result<(), String> {
-    let known: HashSet<u32> = {
-        let conn = db.lock().unwrap();
-        conn.prepare("SELECT uid FROM emails WHERE uid IS NOT NULL")
-            .and_then(|mut stmt| stmt.query_map([], |r| r.get(0))?.collect())
-            .map_err(|e| e.to_string())?
-    };
-    let unknown: Vec<u32> = all_uids.iter().copied().filter(|u| !known.contains(u)).collect();
+fn read_uid_setting(db: &Db, key: &str) -> Option<u32> {
+    get_setting(&db.lock().unwrap(), key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+}
+
+fn query_uids(db: &Db, sql: &str, folder: &str) -> Result<Vec<u32>, String> {
+    let conn = db.lock().unwrap();
+    conn.prepare(sql)
+        .and_then(|mut stmt| stmt.query_map([folder], |r| r.get(0))?.collect())
+        .map_err(|e| e.to_string())
+}
+
+// Find the server UIDs of emails in this folder that don't have one yet: emails from before
+// DadMail tracked UIDs (all of the folder is checked once), and emails just moved here
+// (the server gives them new, higher UIDs).
+async fn map_missing_uids(
+    session: &mut ImapSession,
+    db: &Db,
+    folder: &str,
+    all_uids: &[u32],
+    first_time: bool,
+) -> Result<(), String> {
+    let waiting = query_uids(db, "SELECT 1 FROM emails WHERE server_folder = ? AND uid IS NULL LIMIT 1", folder)?;
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let known: HashSet<u32> = query_uids(db, "SELECT uid FROM emails WHERE server_folder = ? AND uid IS NOT NULL", folder)?
+        .into_iter()
+        .collect();
+    let newest_known = known.iter().copied().max().unwrap_or(0);
+    let candidates: Vec<u32> = all_uids
+        .iter()
+        .copied()
+        .filter(|u| !known.contains(u) && (first_time || *u > newest_known))
+        .collect();
     let mut mapped = 0;
-    for chunk in unknown.chunks(UIDS_PER_COMMAND) {
+    for chunk in candidates.chunks(UIDS_PER_COMMAND) {
         let envelopes = fetch_message_ids(session, chunk).await?;
         let mut conn = db.lock().unwrap();
         let tx = conn.transaction().map_err(|e| e.to_string())?;
         for (uid, message_id) in envelopes {
             mapped += tx
                 .execute(
-                    "UPDATE emails SET uid = ? WHERE message_id = ? AND uid IS NULL",
-                    params![uid, message_id],
+                    "UPDATE emails SET uid = ? WHERE server_folder = ? AND message_id = ? AND uid IS NULL",
+                    params![uid, folder, message_id],
                 )
                 .map_err(|e| e.to_string())?;
         }
         tx.commit().map_err(|e| e.to_string())?;
     }
-    log::info!("Matched {mapped} stored emails to their server UIDs");
+    if mapped > 0 {
+        log::info!("Matched {mapped} emails in {folder} to their server UIDs");
+    }
     Ok(())
 }
 
-// Bring read state and deletions made elsewhere (webmail, phone) into DadMail.
-// Returns how many emails changed.
-async fn pull_server_changes(session: &mut ImapSession, db: &Db, all_uids: &[u32]) -> Result<usize, String> {
-    let seen: HashMap<u32, bool> = session
-        .uid_fetch("1:*", "FLAGS")
-        .await
-        .map_err(|e| e.to_string())?
-        .try_filter_map(|fetch| async move {
-            Ok(fetch.uid.map(|uid| (uid, fetch.flags().any(|f| f == Flag::Seen))))
-        })
-        .try_collect()
-        .await
-        .map_err(|e| e.to_string())?;
+// Send changes made in DadMail for emails that are in this folder on the server:
+// read/unread, then moves (deleting moves to the trash, restoring moves back)
+async fn push_pending_actions(
+    session: &mut ImapSession,
+    db: &Db,
+    folder: &str,
+    server_names: &HashMap<&str, String>,
+) -> Result<(), String> {
+    for (action, command) in [("read", "+FLAGS.SILENT (\\Seen)"), ("unread", "-FLAGS.SILENT (\\Seen)")] {
+        let uids = {
+            let conn = db.lock().unwrap();
+            conn.prepare("SELECT uid FROM emails WHERE server_folder = ? AND pending_action = ? AND uid IS NOT NULL")
+                .and_then(|mut stmt| stmt.query_map(params![folder, action], |r| r.get::<_, u32>(0))?.collect::<Result<Vec<_>, _>>())
+                .map_err(|e| e.to_string())?
+        };
+        for chunk in uids.chunks(UIDS_PER_COMMAND) {
+            session
+                .uid_store(uid_set(chunk), command)
+                .await
+                .map_err(|e| e.to_string())?
+                .try_collect::<Vec<_>>()
+                .await
+                .map_err(|e| e.to_string())?;
+            let conn = db.lock().unwrap();
+            for uid in chunk {
+                conn.execute(
+                    "UPDATE emails SET pending_action = NULL WHERE server_folder = ? AND uid = ? AND pending_action = ?",
+                    params![folder, uid, action],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        if !uids.is_empty() {
+            log::info!("Marked {} emails in {folder} as {action} on the server", uids.len());
+        }
+    }
+
+    for target in FOLDERS.iter().filter(|f| **f != folder) {
+        let uids = {
+            let conn = db.lock().unwrap();
+            conn.prepare("SELECT uid FROM emails WHERE server_folder = ? AND folder = ? AND uid IS NOT NULL")
+                .and_then(|mut stmt| stmt.query_map(params![folder, target], |r| r.get::<_, u32>(0))?.collect::<Result<Vec<_>, _>>())
+                .map_err(|e| e.to_string())?
+        };
+        for chunk in uids.chunks(UIDS_PER_COMMAND) {
+            session
+                .uid_mv(uid_set(chunk), &server_names[target])
+                .await
+                .map_err(|e| e.to_string())?;
+            // Now in the target folder, under a new UID that the next pass there looks up
+            let conn = db.lock().unwrap();
+            for uid in chunk {
+                conn.execute(
+                    "UPDATE emails SET server_folder = folder, uid = NULL WHERE server_folder = ? AND uid = ?",
+                    params![folder, uid],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+        if !uids.is_empty() {
+            log::info!("Moved {} emails from {folder} to {target} on the server", uids.len());
+        }
+    }
+    Ok(())
+}
+
+// Bring read state and removals made elsewhere (webmail, phone) into DadMail.
+// An email that is gone from this folder is removed here too; if it was moved,
+// the other folder's pass downloads it there. Returns how many emails changed.
+async fn pull_server_changes(session: &mut ImapSession, db: &Db, folder: &str, all_uids: &[u32]) -> Result<usize, String> {
+    let seen: HashMap<u32, bool> = if all_uids.is_empty() {
+        HashMap::new()
+    } else {
+        session
+            .uid_fetch("1:*", "FLAGS")
+            .await
+            .map_err(|e| e.to_string())?
+            .try_filter_map(|fetch| async move {
+                Ok(fetch.uid.map(|uid| (uid, fetch.flags().any(|f| f == Flag::Seen))))
+            })
+            .try_collect()
+            .await
+            .map_err(|e| e.to_string())?
+    };
     let on_server: HashSet<u32> = all_uids.iter().copied().collect();
 
     let mut conn = db.lock().unwrap();
     let local: Vec<(i64, u32, bool)> = conn
         .prepare(
             "SELECT id, uid, is_read FROM emails
-             WHERE uid IS NOT NULL AND is_deleted = 0 AND pending_action IS NULL",
+             WHERE server_folder = ?1 AND folder = ?1 AND uid IS NOT NULL AND pending_action IS NULL",
         )
         .and_then(|mut stmt| {
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?
+            stmt.query_map([folder], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)))?
                 .collect()
         })
         .map_err(|e| e.to_string())?;
@@ -258,7 +314,7 @@ async fn pull_server_changes(session: &mut ImapSession, db: &Db, all_uids: &[u32
     let mut changed = 0;
     for (id, uid, is_read) in local {
         if !on_server.contains(&uid) {
-            tx.execute("UPDATE emails SET is_deleted = 1, uid = NULL WHERE id = ?", [id])
+            tx.execute("DELETE FROM emails WHERE id = ?", [id])
                 .map_err(|e| e.to_string())?;
             changed += 1;
         } else if let Some(&server_read) = seen.get(&uid) {
@@ -271,7 +327,7 @@ async fn pull_server_changes(session: &mut ImapSession, db: &Db, all_uids: &[u32
     }
     tx.commit().map_err(|e| e.to_string())?;
     if changed > 0 {
-        log::info!("Applied {changed} read or delete changes from the server");
+        log::info!("Applied {changed} changes from the server in {folder}");
     }
     Ok(changed)
 }
@@ -322,6 +378,13 @@ pub async fn save_to_sent(email: &str, password: &str, message_id: &str, raw: &[
     Ok(())
 }
 
+struct FolderResult {
+    arrived: Vec<NewEmail>,
+    older: usize,
+    remaining: usize,
+    changes: usize,
+}
+
 async fn sync_emails(app: &AppHandle, db: &Db) -> Result<SyncOutcome, String> {
     let settings = get_settings(&db.lock().unwrap()).map_err(|e| e.to_string())?;
     let email = settings.get("email");
@@ -331,26 +394,69 @@ async fn sync_emails(app: &AppHandle, db: &Db) -> Result<SyncOutcome, String> {
         return Ok(SyncOutcome::NoCredentials);
     };
 
-    emit_status(app, "syncing", "Připojuji se k serveru...", None);
     let mut session = connect(email, &password).await?;
-    emit_status(app, "syncing", "Kontroluji schránku...", None);
+    let server_names: HashMap<&str, String> = HashMap::from([
+        ("inbox", "INBOX".to_string()),
+        ("sent", find_folder(&mut session, NameAttribute::Sent, "sent").await),
+        ("trash", find_folder(&mut session, NameAttribute::Trash, "trash").await),
+    ]);
+    let date_limit = settings.get("sync_from_date").and_then(|d| imap_since(d));
 
-    let mailbox = session.select("INBOX").await.map_err(|e| e.to_string())?;
+    let mut arrived = Vec::new();
+    let (mut downloaded, mut remaining, mut changes) = (0, 0, 0);
+    for folder in FOLDERS {
+        let result = sync_folder(app, db, &mut session, folder, &server_names, date_limit.as_deref()).await?;
+        downloaded += result.arrived.len() + result.older;
+        remaining += result.remaining;
+        changes += result.changes;
+        if folder == "inbox" {
+            arrived = result.arrived;
+        }
+    }
+    let _ = session.logout().await;
+
+    if !arrived.is_empty() {
+        crate::notify_new_mail(app, &arrived);
+    }
+    log::info!("Sync complete. {downloaded} downloaded, {changes} changes, {remaining} older remaining.");
+
+    // Background checks stay quiet unless emails are still downloading
+    if remaining > 0 {
+        emit_status(app, "syncing", &format!("Stahuji starší emaily, zbývá {remaining}"), None);
+    } else {
+        emit_status(app, "idle", "", None);
+    }
+    if downloaded > 0 || changes > 0 {
+        crate::update_unread_count(app, &db.lock().unwrap());
+        let _ = app.emit("emails-updated", arrived.len());
+    }
+    Ok(SyncOutcome::Done { history_complete: remaining == 0 })
+}
+
+async fn sync_folder(
+    app: &AppHandle,
+    db: &Db,
+    session: &mut ImapSession,
+    folder: &str,
+    server_names: &HashMap<&str, String>,
+    date_limit: Option<&str>,
+) -> Result<FolderResult, String> {
+    let key = |base: &str| state_key(folder, base);
+    let mailbox = session.select(&server_names[folder]).await.map_err(|e| e.to_string())?;
 
     // UIDs stay the same when other emails are deleted, unlike sequence numbers.
-    // If the server renumbers the mailbox (new UIDVALIDITY), start over; duplicates are skipped by message ID.
+    // If the server renumbers the folder (new UIDVALIDITY), start over; duplicates are skipped by message ID.
     let uid_validity = mailbox.uid_validity.unwrap_or(0).to_string();
     {
         let conn = db.lock().unwrap();
-        if get_setting(&conn, "sync_uidvalidity").ok().flatten().as_deref() != Some(&uid_validity) {
-            conn.execute(
-                "DELETE FROM settings WHERE key IN ('sync_newest_uid', 'sync_oldest_uid', 'sync_uids_matched')",
-                [],
-            )
-            .map_err(|e| e.to_string())?;
-            conn.execute("UPDATE emails SET uid = NULL", [])
+        if get_setting(&conn, &key("sync_uidvalidity")).ok().flatten().as_deref() != Some(&uid_validity) {
+            for base in ["sync_newest_uid", "sync_oldest_uid", "sync_uids_matched"] {
+                conn.execute("DELETE FROM settings WHERE key = ?", [key(base)])
+                    .map_err(|e| e.to_string())?;
+            }
+            conn.execute("UPDATE emails SET uid = NULL WHERE server_folder = ?", [folder])
                 .map_err(|e| e.to_string())?;
-            set_setting(&conn, "sync_uidvalidity", &uid_validity).map_err(|e| e.to_string())?;
+            set_setting(&conn, &key("sync_uidvalidity"), &uid_validity).map_err(|e| e.to_string())?;
         }
     }
 
@@ -362,100 +468,57 @@ async fn sync_emails(app: &AppHandle, db: &Db) -> Result<SyncOutcome, String> {
         .collect();
     all_uids.sort_unstable();
 
-    let uids_matched = get_setting(&db.lock().unwrap(), "sync_uids_matched").ok().flatten();
-    if uids_matched.as_deref() != Some(&uid_validity) {
-        map_missing_uids(&mut session, db, &all_uids).await?;
-        set_setting(&db.lock().unwrap(), "sync_uids_matched", &uid_validity).map_err(|e| e.to_string())?;
+    let matched = get_setting(&db.lock().unwrap(), &key("sync_uids_matched")).ok().flatten();
+    let first_time = matched.as_deref() != Some(&uid_validity);
+    map_missing_uids(session, db, folder, &all_uids, first_time).await?;
+    if first_time {
+        set_setting(&db.lock().unwrap(), &key("sync_uids_matched"), &uid_validity).map_err(|e| e.to_string())?;
     }
-    push_pending_actions(&mut session, db).await?;
-    let server_changes = pull_server_changes(&mut session, db, &all_uids).await?;
 
-    let date_limit = settings.get("sync_from_date").and_then(|d| imap_since(d));
-    let uids: Vec<u32> = match &date_limit {
-        Some(query) => {
-            let mut uids: Vec<u32> = session
-                .uid_search(query)
-                .await
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .collect();
-            uids.sort_unstable();
-            uids
-        }
-        None => all_uids.clone(),
+    push_pending_actions(session, db, folder, server_names).await?;
+    let mut changes = pull_server_changes(session, db, folder, &all_uids).await?;
+
+    // Moves above may have changed the folder; look again before downloading
+    let uids: Vec<u32> = {
+        let query = date_limit.unwrap_or("ALL");
+        let mut uids: Vec<u32> = session
+            .uid_search(query)
+            .await
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .collect();
+        uids.sort_unstable();
+        uids
     };
-    let query = date_limit.as_deref().unwrap_or("ALL");
-    log::info!("INBOX has {} messages matching {query}", uids.len());
-
     if uids.is_empty() {
-        let _ = session.logout().await;
-        emit_status(app, "success", "Schránka je prázdná", None);
-        if server_changes > 0 {
-            let _ = app.emit("emails-updated", 0);
-        }
-        return Ok(SyncOutcome::Done { history_complete: true });
+        return Ok(FolderResult { arrived: Vec::new(), older: 0, remaining: 0, changes });
     }
 
-    let (newest, oldest) = {
-        let conn = db.lock().unwrap();
-        let read = |key| {
-            get_setting(&conn, key)
-                .ok()
-                .flatten()
-                .and_then(|v| v.parse::<u32>().ok())
-        };
-        (read("sync_newest_uid"), read("sync_oldest_uid"))
-    };
-
+    let newest = read_uid_setting(db, &key("sync_newest_uid"));
+    let oldest = read_uid_setting(db, &key("sync_oldest_uid"));
     let (new_uids, history_uids) = plan_sync(&uids, newest, oldest);
-    log::info!("Sync plan: {} new, {} older", new_uids.len(), history_uids.len());
 
     let mut arrived = Vec::new();
-    fetch_uids(app, db, &mut session, &new_uids, "nové emaily", &mut arrived).await?;
+    fetch_uids(app, db, session, folder, &new_uids, &mut arrived).await?;
     let mut older = Vec::new();
-    fetch_uids(app, db, &mut session, &history_uids, "starší emaily", &mut older).await?;
-    let new_count = arrived.len() + older.len();
-    // Only mail that really just arrived, not the first download or older history
-    if newest.is_some() && !arrived.is_empty() {
-        crate::notify_new_mail(app, &arrived);
+    fetch_uids(app, db, session, folder, &history_uids, &mut older).await?;
+    changes += arrived.len() + older.len();
+    // The first download of a folder is not "new mail"
+    if newest.is_none() {
+        older.append(&mut arrived);
     }
 
-    let lowest_processed = new_uids
-        .iter()
-        .chain(&history_uids)
-        .copied()
-        .chain(oldest)
-        .min();
+    let lowest_processed = new_uids.iter().chain(&history_uids).copied().chain(oldest).min();
     {
         let conn = db.lock().unwrap();
-        set_setting(&conn, "sync_newest_uid", &uids[uids.len() - 1].to_string())
+        set_setting(&conn, &key("sync_newest_uid"), &uids[uids.len() - 1].to_string())
             .map_err(|e| e.to_string())?;
         if let Some(lowest) = lowest_processed {
-            set_setting(&conn, "sync_oldest_uid", &lowest.to_string()).map_err(|e| e.to_string())?;
+            set_setting(&conn, &key("sync_oldest_uid"), &lowest.to_string()).map_err(|e| e.to_string())?;
         }
     }
-    let _ = session.logout().await;
-
     let remaining = lowest_processed.map_or(0, |lowest| uids.iter().filter(|&&u| u < lowest).count());
-    let history_complete = remaining == 0;
-    let message = if history_complete && date_limit.is_some() {
-        format!("Hotovo! Načteno {new_count} emailů (dosaženo datového limitu)")
-    } else if history_complete {
-        "Hotovo! Všechny emaily synchronizovány".to_string()
-    } else if new_count > 0 {
-        format!("Načteno {new_count} emailů (zbývá {remaining} starších)")
-    } else {
-        "Žádné nové emaily".to_string()
-    };
-    log::info!("Sync complete. Added {new_count} new emails, {remaining} older remaining.");
-    emit_status(app, "success", &message, None);
-    // The UI reloads the list on this event, so only send it when something changed
-    if new_count > 0 || server_changes > 0 {
-        crate::update_unread_count(app, &db.lock().unwrap());
-        let _ = app.emit("emails-updated", new_count);
-    }
-
-    Ok(SyncOutcome::Done { history_complete })
+    Ok(FolderResult { arrived, older: older.len(), remaining, changes })
 }
 
 // Download and store the given UIDs, skipping emails already in the database
@@ -463,14 +526,13 @@ async fn fetch_uids(
     app: &AppHandle,
     db: &Db,
     session: &mut ImapSession,
+    folder: &str,
     uids: &[u32],
-    label: &str,
     new_emails: &mut Vec<NewEmail>,
 ) -> Result<(), String> {
     if uids.is_empty() {
         return Ok(());
     }
-    emit_status(app, "syncing", &format!("Kontroluji {label}..."), None);
 
     // The envelope carries the Message-ID, which is enough to tell what we already have
     let envelopes = fetch_message_ids(session, uids).await?;
@@ -478,11 +540,11 @@ async fn fetch_uids(
     let mut missing: Vec<(u32, String)> = {
         let conn = db.lock().unwrap();
         let mut exists = conn
-            .prepare("SELECT 1 FROM emails WHERE message_id = ?")
+            .prepare("SELECT 1 FROM emails WHERE folder = ? AND message_id = ?")
             .map_err(|e| e.to_string())?;
         envelopes
             .into_iter()
-            .filter(|(_, id)| !exists.exists([id]).unwrap_or(false))
+            .filter(|(_, id)| !exists.exists(params![folder, id]).unwrap_or(false))
             .collect()
     };
     if missing.is_empty() {
@@ -490,17 +552,12 @@ async fn fetch_uids(
     }
     // Newest first
     missing.sort_unstable_by(|a, b| b.0.cmp(&a.0));
-    log::info!("Found {} new emails to fetch", missing.len());
+    log::info!("Found {} emails to fetch in {folder}", missing.len());
 
     for (batch_index, batch) in missing.chunks(BATCH_SIZE).enumerate() {
         let done = ((batch_index + 1) * BATCH_SIZE).min(missing.len());
         let progress = (done * 100 / missing.len()) as u32;
-        emit_status(
-            app,
-            "syncing",
-            &format!("Stahuji {done}/{} emailů...", missing.len()),
-            Some(progress),
-        );
+        emit_status(app, "syncing", &format!("Stahuji emaily: {done} z {}", missing.len()), Some(progress));
 
         // BODY.PEEK leaves the email unread on the server
         let batch_uids: Vec<u32> = batch.iter().map(|(uid, _)| *uid).collect();
@@ -539,9 +596,9 @@ async fn fetch_uids(
                 let mut insert = tx
                     .prepare(
                         "INSERT OR IGNORE INTO emails (
-                          message_id, from_addr, from_name, to_addr, subject,
-                          body_html, body_text, preview, date, thread_id, uid
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          folder, server_folder, message_id, from_addr, from_name, to_addr, subject,
+                          body_html, body_text, preview, date, thread_id, uid, is_read
+                        ) VALUES (?1, ?1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     )
                     .map_err(|e| e.to_string())?;
                 let mut insert_raw = tx
@@ -558,10 +615,11 @@ async fn fetch_uids(
                             .duration_since(std::time::UNIX_EPOCH)
                             .map_or(0, |d| d.as_secs() as i64)
                     });
+                    // Sent emails are the user's own: never unread
                     let added = insert
                         .execute(params![
-                            message_id, p.from_addr, p.from_name, p.to_addr, p.subject,
-                            p.body_html, p.body_text, p.preview, date, p.in_reply_to, uid
+                            folder, message_id, p.from_addr, p.from_name, p.to_addr, p.subject,
+                            p.body_html, p.body_text, p.preview, date, p.in_reply_to, uid, folder == "sent"
                         ])
                         .map_err(|e| e.to_string())?;
                     if added > 0 {
@@ -580,15 +638,9 @@ async fn fetch_uids(
             inserted
         };
 
-        let new_count = new_emails.len();
         if inserted > 0 {
-            emit_status(
-                app,
-                "syncing",
-                &format!("Načteno {new_count} emailů..."),
-                Some(progress),
-            );
-            let _ = app.emit("emails-updated", new_count);
+            // Let the list show new emails while the rest are still downloading
+            let _ = app.emit("emails-updated", 0);
         }
     }
     Ok(())

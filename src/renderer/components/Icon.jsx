@@ -86,6 +86,32 @@ const PATHS = {
     </>
   ),
   check: <path d="M5 12.5l4.5 4.5L19 7.5" />,
+  forward: (
+    <>
+      <path d="M15 7l5 5-5 5" />
+      <path d="M20 12H10a6 6 0 0 0-6 6v1" />
+    </>
+  ),
+  print: (
+    <>
+      <path d="M7 9V4h10v5" />
+      <rect x="4" y="9" width="16" height="7" rx="1.5" />
+      <path d="M7 14h10v6H7z" />
+    </>
+  ),
+  unread: (
+    <>
+      <rect x="3" y="5" width="15" height="13" rx="2" />
+      <path d="M3.5 6.5L10.5 12l3.5-2.7" />
+      <circle cx="19" cy="6" r="2.5" fill="currentColor" stroke="none" />
+    </>
+  ),
+  restore: (
+    <>
+      <path d="M4 12a8 8 0 1 0 2.34-5.66" />
+      <path d="M4 4v5h5" />
+    </>
+  ),
 };
 
 function Icon({ name, className = 'w-5 h-5' }) {
